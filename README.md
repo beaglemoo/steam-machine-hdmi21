@@ -1,0 +1,226 @@
+# steam-machine-hdmi21
+
+HDMI 2.1 FRL with working VRR on the Valve Steam Machine, on SteamOS kernel 7.2
+(`linux-neptune-72`).
+
+Out of the box the Steam Machine drives an HDMI 2.1 display over TMDS, which
+caps it at 4K120 4:2:0 8-bit. Booting with `amdgpu.dcfeaturemask=0x402` turns on
+the DC FRL code path and gets the full HDMI 2.1 link: 4K144, 10-bit, 4:4:4, HDR.
+What you lose in exchange is VRR, because the display driver stops recognising
+the sink as HDMI once it is running FRL. This repository contains the one-line
+kernel fix for that, a build script that produces a patched `amdgpu` module for
+the exact kernel you are running, and the glue that keeps it all working across
+SteamOS updates.
+
+Verified on a Steam Machine driving an LG C4 at 3840x2160 144 Hz, 10-bit 4:4:4,
+HDR, VRR 40-144 Hz, on kernel `7.2.0-valve1-1-neptune-72-gd39b4282853d`.
+
+## The problem
+
+`amdgpu_dm_update_freesync_caps()` in
+`drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c` decides whether a connector
+is FreeSync capable. Its HDMI branch tests the sink signal for exact equality
+with `SIGNAL_TYPE_HDMI_TYPE_A`. When the link trains as FRL the sink signal is
+one of the other HDMI signal types that DC knows about, so the branch is
+skipped, the VRR range from the EDID is never parsed, and the connector's
+`vrr_capable` property stays false. Nothing downstream can enable VRR:
+`vrr_range` in debugfs is empty, gamescope and Steam see a fixed-refresh
+display, and the TV reports VRR off.
+
+The fix is to use DC's own helper, which matches every HDMI signal type instead
+of just one:
+
+```diff
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -14324,7 +14324,7 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
+ 		}
+ 
+ 	/* HDMI */
+-	} else if (sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A) {
++	} else if (dc_is_hdmi_signal(sink->sink_signal)) {
+ 		/* Prefer HDMI VRR */
+ 		if (hdmi_vrr.supported) {
+ 			amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_HDMI;
+```
+
+Valve's 7.2 tree already carries Tomasz Pakula's HDMI VRR series as `[FROM-ML]`
+commits, but not this fix-up, which is why FRL plus VRR does not work on stock
+SteamOS. The change is equivalent to commit `21d564d5a1`, "Switch to signal type
+helper functions from DC", on the `hdmi-7.2` branch of
+<https://github.com/Lawstorant/linux>. All credit for the HDMI FRL and VRR work,
+and for this fix, goes to Tomasz Pakula (Lawstorant); this repository only
+packages it for SteamOS.
+
+## Requirements
+
+- A Steam Machine (or another SteamOS 3.9 device) on `linux-neptune-72`.
+- `linux-neptune-72-headers` matching the running kernel. `build.sh` installs it
+  if it is missing.
+- About 8 GB free in the cache directory: the Valve kernel source tarball is
+  3.4 GB and its extracted git repository is another 3.5 GB.
+- Secure Boot off (the default), because the module is unsigned.
+
+## Quick start
+
+```
+cd /home/deck
+git clone <this repo> steam-machine-hdmi21
+cd steam-machine-hdmi21
+./build.sh                    # ~2 min build, plus the source download the first time
+sudo ./install.sh
+sudo ./setup-selfheal.sh
+sudo ./hdmi-mode.sh frl
+sudo reboot
+```
+
+After the reboot, pick 3840x2160 at 144 Hz in Steam's display settings (Steam
+defaults to 120 Hz) and turn HDR on.
+
+`build.sh` is unattended and idempotent. It detects the running kernel, works
+out which `linux-neptune-NN` package it came from, downloads the newest matching
+source tarball from the SteamOS mirror into
+`/home/deck/.cache/steam-machine-hdmi21/`, extracts only the bare git repository
+from it, checks out the tag whose commit hash matches the `-g` suffix of
+`uname -r`, applies the patch with `git am`, and builds just the amdgpu module
+out of tree. The result lands in `out/amdgpu-$(uname -r).ko.zst` with a
+`.vermagic` sidecar. Useful flags: `--src-tarball PATH` to use a tarball you
+already have, `--jobs N`, `--cache-dir DIR`, `--out-dir DIR`.
+
+The build is deliberately out of tree. SteamOS has no glibc headers, so the
+kernel host tools (`fixdep`, `modpost`, `kconfig`) cannot be compiled and an
+in-tree build is impossible; the headers package ships those tools prebuilt.
+The one extra make variable, `CFLAGS_amdgpu_trace_points.o=-I<src>/include/trace`,
+is needed because `amdgpu_trace.h` sets `TRACE_INCLUDE_PATH` relative to
+`include/trace/define_trace.h`, which resolves inside the headers tree where the
+driver sources do not exist.
+
+`install.sh` copies the module to `/lib/modules/$(uname -r)/updates/amdgpu.ko.zst`
+with the read-only root temporarily disabled, runs `depmod -a`, checks that
+`modprobe` now resolves amdgpu to `updates/`, and regenerates the initramfs. It
+refuses to install a module whose vermagic does not match the running kernel.
+`--dry-run` prints everything it would do without touching the system. The stock
+module under `kernel/drivers/gpu/drm/amd/amdgpu/` is never modified, so the
+change is fully reversible.
+
+`hdmi-mode.sh` switches the link mode:
+
+- `sudo ./hdmi-mode.sh frl` writes `/etc/default/grub.d/hdmi-frl.cfg` with
+  `amdgpu.dcfeaturemask=0x402` (DC_FRL_MASK `0x400` plus the default `0x2`),
+  creates the marker file `~/.hdmi-frl-enabled`, and runs `update-grub`.
+- `sudo ./hdmi-mode.sh tmds` removes both and regenerates grub.
+- `./hdmi-mode.sh status` reports the running mode, the configured mode, whether
+  the patched module is installed, and the current mode line.
+
+Both need a reboot. `STATE_DIR` overrides where the marker file lives; by
+default it is the home directory of the user who ran sudo.
+
+## Verifying
+
+```
+cat /proc/cmdline | tr ' ' '\n' | grep dcfeaturemask      # amdgpu.dcfeaturemask=0x402
+modinfo -F vermagic amdgpu                                 # matches uname -r
+sudo cat /sys/kernel/debug/dri/0/HDMI-A-1/vrr_range        # Min: 40  Max: 144
+modetest -M amdgpu -c | grep -A2 vrr_capable               # value: 1
+sudo grep -A2 '^HPO:' /sys/kernel/debug/dri/0/amdgpu_dm_dtn_log
+```
+
+The last command prints the link state; on a working FRL link it shows the pixel
+format and bit depth, for example:
+
+```
+HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow   h_active   h_blank
+[0]:          0   Training        4:4:4      10              1       4   ACTIVE       3840        160
+```
+
+`4:4:4` at depth `10` over `4` lanes is the HDMI 2.1 FRL link. An empty
+`vrr_range` means the patched module is not loaded. On the TV, the LG C4 shows
+`4K 144Hz` and VRR active in its own signal information panel.
+
+## Reverting
+
+```
+sudo ./hdmi-mode.sh tmds     # back to TMDS: 4K120 4:2:0, VRR works on the stock module
+sudo ./uninstall.sh          # remove the patched module override
+sudo ./setup-selfheal.sh --remove
+sudo reboot
+```
+
+`uninstall.sh` deletes only `/lib/modules/$(uname -r)/updates/amdgpu.ko.zst` and
+re-runs `depmod` and `mkinitcpio`, so the stock module takes over again.
+
+## Surviving SteamOS updates
+
+A SteamOS atomic update replaces `/etc` and the whole `/usr` and `/lib` tree. Of
+this setup:
+
+- `/home` survives, so the checkout, the built module and the marker file are
+  kept.
+- `/etc/systemd/system/*.service` and `/etc/atomic-update.conf.d/*.conf` are on
+  the default keep list, so the self-heal unit survives.
+- `/etc/default/grub.d/hdmi-frl.cfg` is not, which is what
+  `selfheal/atomic-update-keep.conf` is for; `setup-selfheal.sh` installs it as
+  `/etc/atomic-update.conf.d/hdmi-frl.conf`.
+- `/lib/modules/.../updates/amdgpu.ko.zst` does not survive, and if the update
+  ships a new kernel the old module would not load anyway.
+
+`setup-selfheal.sh` installs `hdmi-frl-grub.service`, a oneshot unit ordered
+after `local-fs.target`, `home.mount` and `network-online.target`. On every boot
+it:
+
+1. Does nothing at all if the marker file is absent, beyond removing a stale
+   grub drop-in. That is the TMDS case.
+2. Recreates the grub drop-in and re-runs `update-grub` if the FRL mask is
+   missing.
+3. Reinstalls the patched module if `out/` already holds one whose vermagic
+   matches the running kernel.
+4. Otherwise starts `build.sh` followed by `install.sh` in a detached transient
+   unit called `hdmi-frl-rebuild`, so that a kernel change does not block the
+   boot for the length of a download and a compile. Follow it with
+   `journalctl -fu hdmi-frl-rebuild`. VRR is missing until that finishes and you
+   reboot once more; FRL itself, being a kernel parameter, works immediately.
+
+Check on it with `systemctl status hdmi-frl-grub.service` and
+`./hdmi-mode.sh status`.
+
+## Known limitations
+
+- The module is built out of tree and is unsigned. It taints the kernel with
+  `O` and `E`. Secure Boot is off on SteamOS and `CONFIG_MODULE_SIG_FORCE` is
+  not set, so it loads normally.
+- A SteamOS update that changes the kernel means a rebuild. That is automatic
+  with the self-heal installed, but it needs a working network connection and a
+  second reboot.
+- `mkinitcpio -P` exits 1 on SteamOS with `ERROR: module not found:
+  blake2b_generic`. This is pre-existing and unrelated; the stock image has the
+  same problem. `install.sh` treats it as non-fatal only when the initramfs
+  image was actually rewritten. `amdgpu` is not part of the initramfs on this
+  machine anyway, so the step only matters for completeness.
+- ALLM: the kernel exposes the ALLM property on the connector, but gamescope
+  3.16.26 never sets it, so the TV is not switched into game mode automatically.
+  Pick the game picture mode on the TV.
+- QMS and DSC are not used. The link runs uncompressed; 4K144 10-bit 4:4:4 fits
+  in FRL 4-lane bandwidth without DSC.
+- The TMDS fallback is a real fallback, not a downgrade path to avoid: without
+  the patched module it is the only mode with working VRR, at 4K120 4:2:0 8-bit.
+- Only the amdgpu module is replaced. Nothing else in the kernel is patched, and
+  the stock module stays on disk untouched.
+
+## Layout
+
+```
+build.sh                    build a patched amdgpu.ko.zst for the running kernel
+install.sh                  install it into /lib/modules/<kernel>/updates/
+uninstall.sh                remove it again
+hdmi-mode.sh                frl | tmds | status
+setup-selfheal.sh           install and enable the boot-time self-heal
+patches/                    the one-line kernel patch, git format-patch style
+selfheal/                   the self-heal script, its unit, and the atomic keep list
+out/                        build output (not tracked)
+work/                       patched kernel checkout (not tracked)
+```
+
+## Licence
+
+GPL-2.0. The patch is a derivative of Linux kernel source; the scripts are
+released under the same licence for consistency. See `LICENSE`.
