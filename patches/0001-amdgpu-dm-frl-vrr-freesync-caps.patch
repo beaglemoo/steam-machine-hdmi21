@@ -1,0 +1,26 @@
+From c5a38da275d2816e2cb5bf3fec03907f6d956e91 Mon Sep 17 00:00:00 2001
+From: deck <deck@steamdeck>
+Date: Sun, 13 Sep 2026 12:20:47 +0100
+Subject: [PATCH] drm/amd/display: use dc_is_hdmi_signal() in freesync caps so
+ FRL sinks get VRR
+
+---
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index 0c10eafd4782..8aff10e91b99 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -14324,7 +14324,7 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
+ 		}
+ 
+ 	/* HDMI */
+-	} else if (sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A) {
++	} else if (dc_is_hdmi_signal(sink->sink_signal)) {
+ 		/* Prefer HDMI VRR */
+ 		if (hdmi_vrr.supported) {
+ 			amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_HDMI;
+-- 
+2.55.0
+
