@@ -25,7 +25,7 @@ MIRROR_REPOS="jupiter-main jupiter-3.9"
 log() { printf '[build %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { printf '[build %s] ERROR: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
-usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
