@@ -1,0 +1,14 @@
+[Unit]
+Description=Re-assert HDMI 2.1 FRL (grub cmdline and patched amdgpu) after a SteamOS update
+After=local-fs.target home.mount network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/deck/steam-machine-hdmi21/selfheal/hdmi-frl-selfheal.sh
+
+[Service]
+Type=oneshot
+Environment=HDMI_FRL_REPO=/home/deck/steam-machine-hdmi21
+Environment=STATE_DIR=/home/deck
+ExecStart=/home/deck/steam-machine-hdmi21/selfheal/hdmi-frl-selfheal.sh
+
+[Install]
+WantedBy=multi-user.target
