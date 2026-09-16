@@ -1,6 +1,9 @@
 [Unit]
 Description=Re-assert HDMI 2.1 FRL (grub cmdline and patched amdgpu) after a SteamOS update
 After=local-fs.target home.mount network-online.target
+# Both call pacman on the first boot after an update; serialise them so they do
+# not fight over the database lock. Ordering only, the unit may not exist.
+After=xone-selfheal.service
 Wants=network-online.target
 ConditionPathExists=/home/deck/steam-machine-hdmi21/selfheal/hdmi-frl-selfheal.sh
 
