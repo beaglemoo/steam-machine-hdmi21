@@ -27,7 +27,9 @@ set -euo pipefail
 CHECK=0
 FORCE=0
 
-TMDS_MAX_KHZ=600000	# anything above this pixel clock needs an FRL link
+TMDS_MAX_KHZ=1200000	# above this pixel clock only an FRL link works: TMDS tops out
+			# at 600 MHz character rate, and 4:2:0 halves it, so 4K120 4:2:0
+			# (1188000 kHz) still fits TMDS while 4K144 (1332750 kHz) does not
 CONNECT_WAIT=60		# seconds to wait for the sink to come back
 ATTEMPTS=5		# re-detect cycles before giving up
 
