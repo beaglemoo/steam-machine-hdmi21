@@ -1,0 +1,91 @@
+From 0396f4f8028cf5409e8314e63c562126acb5d62e Mon Sep 17 00:00:00 2001
+From: steam-machine-hdmi21 <hdmi21@localhost>
+Date: Wed, 16 Sep 2026 18:52:37 +0100
+Subject: [PATCH] drm/amd/display: re-verify the HDMI FRL link capability on
+ every hotplug
+
+With amdgpu.dcfeaturemask=0x402 an FRL-capable HDMI sink trains at FRL on
+the first detect after boot (an LG C4 comes up at 4K144, 10-bit 4:4:4), but
+every later detect ends TMDS-only: a TV re-handshake after wake, a TV input
+switch, or a write of 0 then 1 to the connector's debugfs trigger_hotplug
+all leave the link at 600 MHz TMDS until the machine is rebooted.
+
+The detect path recreates the sink as SIGNAL_TYPE_HDMI_TYPE_A, so only a
+destructive verify can promote it back to FRL;
+verify_link_capability_non_destructive() cannot. Which one runs is decided
+by should_verify_link_capability_destructively(), whose HDMI FRL branch
+sets destrictive = true and then gives it away again:
+
+	} else if (link->dc->config.skip_frl_pretraining) {
+		for (i = 0; i < MAX_PIPES; i++) {
+			if (pipes[i].stream != NULL &&
+				pipes[i].stream->link == link) {
+				/*If link is already active, skip PHY programming*/
+				if (link->link_status.link_active) {
+					destrictive = false;
+				}
+			}
+		}
+	}
+
+dc->config.skip_frl_pretraining is set unconditionally in every DCN 3.x
+resource file, dcn32_resource.c and dcn321_resource.c included, so it is
+always true on this Navi 33. gamescope keeps the CRTC lit across a hotplug,
+so link_status.link_active is always true too once the desktop is up. The
+result is that every detect after the first one is non-destructive and the
+link can never be promoted to FRL again.
+
+Mainline no longer has that global gate. The same branch there reads
+
+	} else if (link->local_sink->edid_caps.panel_patch.skip_frl_pre_training) {
+
+i.e. a per-panel EDID quirk that is off unless a specific panel asks for
+it, so a current kernel retrains FRL destructively on every hotplug. See
+commit c953b39f9487 ("drm/amd/display: Reintroduce "Force validation link
+training on all ASICs"").
+
+7.2.4-valve1 has no panel_patch.skip_frl_pre_training field to switch to,
+so drop the else-if and its pipe loop entirely, leaving is_hdmi_frl_in_use()
+as the only reason to go non-destructive. That is mainline behaviour for
+every panel without the quirk. The pipe walk's two locals go with it as
+they have no other user.
+
+Trade-off: a hotplug now tears the link down and retrains it, so the output
+blanks for a moment where it previously stayed lit at the wrong rate. That
+is what mainline does anyway, and it is the price of coming back at 4K144
+instead of 4K120 4:2:0.
+---
+ .../gpu/drm/amd/display/dc/link/link_detection.c   | 14 --------------
+ 1 file changed, 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/display/dc/link/link_detection.c b/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+index 75dcc39126bc..1d9c6b3dfd34 100644
+--- a/drivers/gpu/drm/amd/display/dc/link/link_detection.c
++++ b/drivers/gpu/drm/amd/display/dc/link/link_detection.c
+@@ -926,23 +926,9 @@ static bool should_verify_link_capability_destructively(struct dc_link *link,
+ 	} else if (dc_is_hdmi_signal(link->local_sink->sink_signal) && link->link_enc &&
+ 				link->link_enc->features.flags.bits.IS_HDMI_FRL_CAPABLE &&
+ 				link->local_sink->edid_caps.max_frl_rate != 0) {
+-		int i = 0;
+-		struct pipe_ctx *pipes =
+-				link->dc->current_state->res_ctx.pipe_ctx;
+-
+ 		destrictive = true;
+ 		if (is_hdmi_frl_in_use(link)) {
+ 			destrictive = false;
+-		} else if (link->dc->config.skip_frl_pretraining) {
+-			for (i = 0; i < MAX_PIPES; i++) {
+-				if (pipes[i].stream != NULL &&
+-					pipes[i].stream->link == link) {
+-					/*If link is already active, skip PHY programming*/
+-					if (link->link_status.link_active) {
+-						destrictive = false;
+-					}
+-				}
+-			}
+ 		}
+ 	}
+ 
+-- 
+2.55.0
+

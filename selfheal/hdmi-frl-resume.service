@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore HDMI 2.1 FRL modes after resume
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+ConditionPathExists=/home/deck/steam-machine-hdmi21/selfheal/hdmi-frl-resume.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/deck/steam-machine-hdmi21/selfheal/hdmi-frl-resume.sh
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
