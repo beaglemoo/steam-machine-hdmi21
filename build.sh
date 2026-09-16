@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PATCH="$REPO_DIR/patches/0001-amdgpu-dm-frl-vrr-freesync-caps.patch"
+PATCH_DIR="$REPO_DIR/patches"
 
 CACHE_DIR=${CACHE_DIR:-/home/deck/.cache/steam-machine-hdmi21}
 WORK_DIR=${WORK_DIR:-$REPO_DIR/work}
@@ -223,27 +223,61 @@ log "tag           $TAG ($KHASH)"
 SRC="$WORK_DIR/src"
 TAG_COMMIT=$(git -C "$BARE" rev-parse "$TAG^{commit}")
 
+shopt -s nullglob
+PATCHES=( "$PATCH_DIR"/*.patch )
+shopt -u nullglob
+[ ${#PATCHES[@]} -gt 0 ] || die "no patches in $PATCH_DIR"
+
+DM_C="$SRC/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c"
+LINK_DETECTION_C="$SRC/drivers/gpu/drm/amd/display/dc/link/link_detection.c"
+
+# Does the checkout show the effect of this patch? Used both to verify a fresh
+# apply and to decide whether an existing checkout is up to date. Every patch
+# needs a case here, so adding one without a check is a hard error.
+patch_applied() {
+	case "$(basename "$1")" in
+	0001-*)
+		grep -q 'dc_is_hdmi_signal(sink->sink_signal)' "$DM_C" 2>/dev/null ;;
+	0002-*)
+		[ -f "$LINK_DETECTION_C" ] \
+			&& ! grep -q 'config.skip_frl_pretraining' "$LINK_DETECTION_C" ;;
+	*)
+		die "no sanity check defined for $(basename "$1")" ;;
+	esac
+}
+
+# An existing checkout may predate a patch that was added since it was made.
+# Applying only the missing ones on top is fragile (the earlier ones are already
+# commits, order and context would have to be tracked), so a checkout that is
+# missing any patch is simply not reusable: it gets thrown away and every patch
+# is applied to a fresh clone of the tag.
 reusable_src() {
 	[ -d "$SRC/.git" ] || return 1
 	git -C "$SRC" merge-base --is-ancestor "$TAG_COMMIT" HEAD 2>/dev/null || return 1
-	grep -q 'dc_is_hdmi_signal(sink->sink_signal)' \
-		"$SRC/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c" 2>/dev/null || return 1
+	local p
+	for p in "${PATCHES[@]}"; do
+		patch_applied "$p" || {
+			log "checkout      $SRC is missing $(basename "$p"), re-creating it"
+			return 1
+		}
+	done
 }
 
 if reusable_src; then
-	log "checkout      $SRC (existing, already patched)"
+	log "checkout      $SRC (existing, all ${#PATCHES[@]} patches applied)"
 else
 	log "checkout      cloning $TAG into $SRC"
 	rm -rf "$SRC"
 	git clone --shared --quiet --branch "$TAG" "$BARE" "$SRC"
 	got=$(git -C "$SRC" rev-parse --short="${#KHASH}" HEAD)
 	[ "$got" = "$KHASH" ] || die "checkout is at $got but the running kernel is $KHASH"
-	log "applying      $(basename "$PATCH")"
-	git -C "$SRC" -c user.name='steam-machine-hdmi21' \
-		-c user.email='hdmi21@localhost' am "$PATCH"
-	grep -q 'dc_is_hdmi_signal(sink->sink_signal)' \
-		"$SRC/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c" \
-		|| die "patch applied but the expected line is not in amdgpu_dm.c"
+	for p in "${PATCHES[@]}"; do
+		log "applying      $(basename "$p")"
+		git -C "$SRC" -c user.name='steam-machine-hdmi21' \
+			-c user.email='hdmi21@localhost' am "$p"
+		patch_applied "$p" \
+			|| die "$(basename "$p") applied but the tree does not show its effect"
+	done
 fi
 
 # --- build ---------------------------------------------------------------

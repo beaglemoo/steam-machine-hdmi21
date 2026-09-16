@@ -7,10 +7,11 @@ Out of the box the Steam Machine drives an HDMI 2.1 display over TMDS, which
 caps it at 4K120 4:2:0 8-bit. Booting with `amdgpu.dcfeaturemask=0x402` turns on
 the DC FRL code path and gets the full HDMI 2.1 link: 4K144, 10-bit, 4:4:4, HDR.
 What you lose in exchange is VRR, because the display driver stops recognising
-the sink as HDMI once it is running FRL. This repository contains the one-line
-kernel fix for that, a build script that produces a patched `amdgpu` module for
-the exact kernel you are running, and the glue that keeps it all working across
-SteamOS updates.
+the sink as HDMI once it is running FRL, and the FRL link itself, which is
+dropped for TMDS on the first hotplug after boot. This repository contains the
+two kernel patches that fix both, a build script that produces a patched
+`amdgpu` module for the exact kernel you are running, and the glue that keeps it
+all working across SteamOS updates.
 
 Verified on a Steam Machine driving an LG C4 at 3840x2160 144 Hz, 10-bit 4:4:4,
 HDR, VRR 40-144 Hz, on kernel `7.2.0-valve1-1-neptune-72-gd39b4282853d`.
@@ -52,6 +53,53 @@ helper functions from DC", on the `hdmi-7.2` branch of
 and for this fix, goes to Tomasz Pakula (Lawstorant); this repository only
 packages it for SteamOS.
 
+## The second problem: FRL is lost on every hotplug
+
+With the mask set, the link trains as FRL on the first detect after boot, but
+every later detect comes back TMDS-only and stays there until the machine is
+rebooted. A TV re-handshake after wake, a TV input switch and a `0` then `1`
+write to `trigger_hotplug` all do it.
+
+A detect recreates the sink as `SIGNAL_TYPE_HDMI_TYPE_A`, so only a destructive
+verify can promote it back to FRL;
+`verify_link_capability_non_destructive()` cannot. Which one runs is decided by
+`should_verify_link_capability_destructively()` in
+`drivers/gpu/drm/amd/display/dc/link/link_detection.c`. Its HDMI FRL branch sets
+`destrictive = true` and then gives it away again:
+
+```c
+	} else if (link->dc->config.skip_frl_pretraining) {
+		for (i = 0; i < MAX_PIPES; i++) {
+			if (pipes[i].stream != NULL &&
+				pipes[i].stream->link == link) {
+				/*If link is already active, skip PHY programming*/
+				if (link->link_status.link_active) {
+					destrictive = false;
+				}
+			}
+		}
+	}
+```
+
+`dc->config.skip_frl_pretraining` is set unconditionally in every DCN 3.x
+resource file, `dcn32_resource.c` and `dcn321_resource.c` among them, so it is
+always true on this Navi 33; and gamescope keeps the CRTC lit across a hotplug,
+so `link_status.link_active` is always true as well. Every detect after the
+first one is therefore non-destructive, and FRL can never come back.
+
+Mainline no longer has that global gate. The same branch there reads
+`link->local_sink->edid_caps.panel_patch.skip_frl_pre_training`, a per-panel
+EDID quirk that is off unless a specific panel asks for it, so a current kernel
+retrains FRL destructively on every hotplug (commit `c953b39f9487`,
+"drm/amd/display: Reintroduce \"Force validation link training on all ASICs\"").
+7.2.4-valve1 has no such field, so `patches/0002-dc-link-frl-verify-on-hotplug.patch`
+drops the `else if` and its pipe loop outright, leaving `is_hdmi_frl_in_use()`
+as the only reason to go non-destructive.
+
+The trade-off is that a hotplug now tears the link down and retrains it, so the
+output blanks for a moment where it used to stay lit at the wrong rate. That is
+mainline behaviour, and it is what buys 4K144 back instead of 4K120 4:2:0.
+
 ## Requirements
 
 - A Steam Machine (or another SteamOS 3.9 device) on `linux-neptune-72`.
@@ -82,8 +130,10 @@ out which `linux-neptune-NN` package it came from, downloads the newest matching
 source tarball from the SteamOS mirror into
 `/home/deck/.cache/steam-machine-hdmi21/`, extracts only the bare git repository
 from it, checks out the tag whose commit hash matches the `-g` suffix of
-`uname -r`, applies the patch with `git am`, and builds just the amdgpu module
-out of tree. The result lands in `out/amdgpu-$(uname -r).ko.zst` with a
+`uname -r`, applies every patch in `patches/` in name order with `git am`, and
+builds just the amdgpu module out of tree. Each patch has a sanity check on the
+resulting tree; an existing `work/src` that is missing one (a checkout made
+before the patch was added) is discarded and rebuilt from the tag. The result lands in `out/amdgpu-$(uname -r).ko.zst` with a
 `.vermagic` sidecar. Useful flags: `--src-tarball PATH` to use a tarball you
 already have, `--jobs N`, `--cache-dir DIR`, `--out-dir DIR`.
 
@@ -185,33 +235,35 @@ Check on it with `systemctl status hdmi-frl-grub.service` and
 
 ## After resume
 
-After an s2idle suspend/resume the driver comes back with the FRL modes gone.
-The connector's mode list loses everything that needs more than the TMDS pixel
-clock ceiling -- 3840x2160 at 143.99 Hz is 1332750 kHz and disappears, leaving
-only modes at or below 600000 kHz -- even though the EDID read back from the TV
-is byte-identical. What was lost is the FRL link capability, not the EDID, so
-re-reading the EDID does not bring it back.
+An s2idle suspend/resume comes back with the FRL modes gone. The connector's
+mode list loses everything above the TMDS pixel clock ceiling -- 3840x2160 at
+143.99 Hz is 1332750 kHz and disappears, leaving only modes at or below 600000
+kHz -- even though the EDID read back from the TV is byte-identical. What was
+lost is the FRL link capability, not the EDID.
 
-Forcing a full re-detect does. The debugfs file
-`/sys/kernel/debug/dri/0/HDMI-A-1/trigger_hotplug` takes a 0 or a 1:
+`selfheal/hdmi-frl-resume.sh` was written to force a re-detect through the
+debugfs file `/sys/kernel/debug/dri/0/HDMI-A-1/trigger_hotplug`: writing `1`
+alone returns early while the connector already reads connected, so it writes a
+`0` first to tear the link down, which makes the following `1` a real
+disconnected-to-connected detect. On this kernel that cannot restore FRL. The
+re-detect does run, but the `skip_frl_pretraining` gate described above turns it
+into a non-destructive verify, which can only bring the link back as TMDS. The
+lost FRL modes after a resume are that same bug, not a separate one.
 
-- Writing `1` asks for a connect. On kernel 7.2 it returns early when the
-  connector already reads connected, which after a resume it does, so on its own
-  it is a no-op.
-- Writing `0` tears the link down: it releases the local sink and sets the link
-  type to none.
-- The `1` after a `0` is therefore a real disconnected-to-connected detect, and
-  that path re-reads the FRL link capability.
+Patch 0002 is the fix: with it the driver verifies the link capability
+destructively on every hotplug, including the one after a resume, and the FRL
+modes come back on their own.
 
-`selfheal/hdmi-frl-resume.sh` does exactly that. It only acts when bit `0x400`
-of `amdgpu.dcfeaturemask` is on the running cmdline, waits up to 60 s for the
-connector to read connected (the TV may still be waking), skips out when the
-sink EDID advertises no `Max Fixed Rate Link`, and reads the current mode list
-with `modetest -M amdgpu -c`. If a mode above 600000 kHz is already there it
-does nothing. Otherwise it runs up to five `0`, `1` cycles, re-checking after
-each one, and on success emits a synthetic `change` uevent on the card with
-`udevadm trigger`, because neither debugfs write emits one of its own and the
-compositor would not otherwise re-read the connector.
+The resume unit stays installed as a belt-and-braces check. It only acts when
+the FRL modes are missing, so with patch 0002 loaded it should normally log
+`FRL modes present, nothing to do` and exit. When it does act, it waits up to
+60 s for the connector to read connected (the TV may still be waking), skips out
+if the sink EDID advertises no `Max Fixed Rate Link`, reads the mode list with
+`modetest -M amdgpu -c`, runs up to five `0`, `1` cycles re-checking after each,
+and on success emits a synthetic `change` uevent with `udevadm trigger`, because
+neither debugfs write emits one and the compositor would not otherwise re-read
+the connector. It does nothing at all unless bit `0x400` of
+`amdgpu.dcfeaturemask` is on the running cmdline.
 
 `setup-selfheal.sh` installs it as `hdmi-frl-resume.service`, a oneshot ordered
 `After=` and `WantedBy=` the four sleep targets.
@@ -225,11 +277,6 @@ journalctl -u hdmi-frl-resume.service -b
 
 `--force` runs one cycle even when the FRL modes are present, which is how the
 cycle itself was verified.
-
-A caveat on how far this is proven: the `0` then `1` cycle has been verified
-only against a live, healthy FRL link, where it keeps the link at 144 Hz and
-gamescope logs nothing. That it restores FRL after a real suspend/resume has not
-been tested yet.
 
 ## Known limitations
 
@@ -262,7 +309,7 @@ install.sh                  install it into /lib/modules/<kernel>/updates/
 uninstall.sh                remove it again
 hdmi-mode.sh                frl | tmds | status
 setup-selfheal.sh           install and enable the boot-time self-heal
-patches/                    the one-line kernel patch, git format-patch style
+patches/                    the two kernel patches, git format-patch style
 selfheal/                   the self-heal scripts, their units, and the atomic keep list
 out/                        build output (not tracked)
 work/                       patched kernel checkout (not tracked)
