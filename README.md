@@ -183,6 +183,54 @@ it:
 Check on it with `systemctl status hdmi-frl-grub.service` and
 `./hdmi-mode.sh status`.
 
+## After resume
+
+After an s2idle suspend/resume the driver comes back with the FRL modes gone.
+The connector's mode list loses everything that needs more than the TMDS pixel
+clock ceiling -- 3840x2160 at 143.99 Hz is 1332750 kHz and disappears, leaving
+only modes at or below 600000 kHz -- even though the EDID read back from the TV
+is byte-identical. What was lost is the FRL link capability, not the EDID, so
+re-reading the EDID does not bring it back.
+
+Forcing a full re-detect does. The debugfs file
+`/sys/kernel/debug/dri/0/HDMI-A-1/trigger_hotplug` takes a 0 or a 1:
+
+- Writing `1` asks for a connect. On kernel 7.2 it returns early when the
+  connector already reads connected, which after a resume it does, so on its own
+  it is a no-op.
+- Writing `0` tears the link down: it releases the local sink and sets the link
+  type to none.
+- The `1` after a `0` is therefore a real disconnected-to-connected detect, and
+  that path re-reads the FRL link capability.
+
+`selfheal/hdmi-frl-resume.sh` does exactly that. It only acts when bit `0x400`
+of `amdgpu.dcfeaturemask` is on the running cmdline, waits up to 60 s for the
+connector to read connected (the TV may still be waking), skips out when the
+sink EDID advertises no `Max Fixed Rate Link`, and reads the current mode list
+with `modetest -M amdgpu -c`. If a mode above 600000 kHz is already there it
+does nothing. Otherwise it runs up to five `0`, `1` cycles, re-checking after
+each one, and on success emits a synthetic `change` uevent on the card with
+`udevadm trigger`, because neither debugfs write emits one of its own and the
+compositor would not otherwise re-read the connector.
+
+`setup-selfheal.sh` installs it as `hdmi-frl-resume.service`, a oneshot ordered
+`After=` and `WantedBy=` the four sleep targets.
+
+To see what it makes of the current link without writing anything:
+
+```
+sudo selfheal/hdmi-frl-resume.sh --check
+journalctl -u hdmi-frl-resume.service -b
+```
+
+`--force` runs one cycle even when the FRL modes are present, which is how the
+cycle itself was verified.
+
+A caveat on how far this is proven: the `0` then `1` cycle has been verified
+only against a live, healthy FRL link, where it keeps the link at 144 Hz and
+gamescope logs nothing. That it restores FRL after a real suspend/resume has not
+been tested yet.
+
 ## Known limitations
 
 - The module is built out of tree and is unsigned. It taints the kernel with
@@ -215,7 +263,7 @@ uninstall.sh                remove it again
 hdmi-mode.sh                frl | tmds | status
 setup-selfheal.sh           install and enable the boot-time self-heal
 patches/                    the one-line kernel patch, git format-patch style
-selfheal/                   the self-heal script, its unit, and the atomic keep list
+selfheal/                   the self-heal scripts, their units, and the atomic keep list
 out/                        build output (not tracked)
 work/                       patched kernel checkout (not tracked)
 ```
