@@ -168,16 +168,13 @@ shopt -u nullglob
 [ ${#connectors[@]} -gt 0 ] || { log "no HDMI connectors in /sys/class/drm"; exit 0; }
 
 rc=0
-found=0
 for path in "${connectors[@]}"; do
 	sysname=${path##*/}
 	card=${sysname%%-*}		# card0
 	conn=${sysname#"$card"-}	# HDMI-A-1
 	card=${card#card}		# 0
-	[ "$(cat "$path/status" 2>/dev/null || true)" = connected ] || continue
-	found=1
+	# handle_connector waits for the sink itself: the TV is often still asleep
+	# when this runs, so a disconnected status here is not a reason to skip.
 	handle_connector "$sysname" "$card" "$conn" || rc=1
 done
-
-[ "$found" = 1 ] || log "no connected HDMI connector, nothing to do"
 exit "$rc"
