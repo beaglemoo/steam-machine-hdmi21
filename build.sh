@@ -63,6 +63,30 @@ log "kernel package $KPKG"
 log "jobs          $JOBS"
 
 # --- kernel headers ------------------------------------------------------
+# An atomic update leaves the keyring directory in place but the trust database
+# stale, and every package then fails to verify with "signature from GitLab CI
+# Package Builder ... is unknown trust", so re-populate unconditionally.
+# The database lock is held by whichever other self-heal is also running pacman
+# on the first boot after an update, so wait for it rather than fail.
+pacman_sync() {
+	local attempt out
+	for attempt in $(seq 1 10); do
+		if out=$(as_root pacman -Sy --needed --noconfirm "$@" 2>&1); then
+			printf '%s\n' "$out" >&2
+			return 0
+		fi
+		printf '%s\n' "$out" >&2
+		case "$out" in
+			*"unable to lock database"*) ;;
+			*) return 1 ;;
+		esac
+		if [ "$attempt" = 10 ]; then return 1; fi
+		log "pacman database is locked, retry $attempt/10 in 30s"
+		sleep 30
+	done
+	return 1
+}
+
 ensure_headers() {
 	[ -d "$BUILD_TREE" ] && { log "headers       $BUILD_TREE (present)"; return 0; }
 	log "headers       missing, installing $KPKG-headers"
@@ -70,9 +94,10 @@ ensure_headers() {
 	if [ ! -d /etc/pacman.d/gnupg ]; then
 		log "initialising pacman keyring"
 		as_root pacman-key --init
-		as_root pacman-key --populate archlinux holo
 	fi
-	as_root pacman -Sy --needed --noconfirm "$KPKG-headers" || {
+	log "refreshing pacman trust database"
+	as_root pacman-key --populate archlinux holo
+	pacman_sync "$KPKG-headers" || {
 		as_root steamos-readonly enable
 		die "pacman could not install $KPKG-headers"
 	}
