@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Install HDMI 2.1 FRL (Steam Machine)
+Comment=Build and install the patched amdgpu module for 4K144 with VRR
+Icon=video-display
+Terminal=false
+Exec=konsole --hold -e bash -c "exec bash \"\\${0%%/*}/setup.sh\" install" %k

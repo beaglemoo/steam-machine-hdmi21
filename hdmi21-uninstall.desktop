@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Uninstall HDMI 2.1 FRL (Steam Machine)
+Comment=Remove the patched amdgpu module and the self-heal units
+Icon=video-display
+Terminal=false
+Exec=konsole --hold -e bash -c "exec bash \"\\${0%%/*}/setup.sh\" uninstall" %k
