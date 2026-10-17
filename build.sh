@@ -4,9 +4,12 @@
 # run from a systemd unit at boot.
 #
 #   ./build.sh [--src-tarball PATH] [--jobs N] [--cache-dir DIR]
-#              [--work-dir DIR] [--out-dir DIR]
+#              [--work-dir DIR] [--out-dir DIR] [--check-kernel]
 #
 # Produces out/amdgpu-<uname -r>.ko.zst and out/amdgpu-<uname -r>.ko.zst.vermagic
+#
+#   --check-kernel  only check that the running kernel has the FRL code path
+#                   (7.2 or later), print the result and exit
 set -euo pipefail
 
 # The cached bare repo is extracted by whoever ran an earlier build (root from
@@ -21,6 +24,7 @@ CACHE_DIR=${CACHE_DIR:-/home/deck/.cache/steam-machine-hdmi21}
 WORK_DIR=${WORK_DIR:-$REPO_DIR/work}
 OUT_DIR=${OUT_DIR:-$REPO_DIR/out}
 SRC_TARBALL=${SRC_TARBALL:-}
+CHECK_KERNEL=0
 JOBS=${JOBS:-$(nproc)}
 
 MIRROR_BASE=https://steamdeck-packages.steamos.cloud/archlinux-mirror/sources
@@ -30,7 +34,7 @@ MIRROR_REPOS="jupiter-main jupiter-3.9"
 log() { printf '[build %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { printf '[build %s] ERROR: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
-usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
 		--cache-dir) CACHE_DIR=${2:?--cache-dir needs a path}; shift 2 ;;
 		--work-dir) WORK_DIR=${2:?--work-dir needs a path}; shift 2 ;;
 		--out-dir) OUT_DIR=${2:?--out-dir needs a path}; shift 2 ;;
+		--check-kernel) CHECK_KERNEL=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown argument: $1 (see --help)" ;;
 	esac
@@ -57,10 +62,37 @@ case "$KREL" in
 	*-g*) KHASH=${KREL##*-g} ;;
 	*) die "kernel release '$KREL' has no -g<hash> suffix, cannot match a Valve tag" ;;
 esac
-NEPTUNE=$(printf '%s\n' "$KREL" | grep -o 'neptune-[0-9]\+' | head -1)
+NEPTUNE=$(printf '%s\n' "$KREL" | grep -o 'neptune-[0-9]\+' | head -1 || true)
 [ -n "$NEPTUNE" ] || die "kernel release '$KREL' is not a linux-neptune kernel"
 KPKG="linux-$NEPTUNE"
 BUILD_TREE="/lib/modules/$KREL/build"
+
+# The patches target the amdgpu DC FRL code path, which first appeared in 7.2.
+# An older kernel has nothing to patch and a newer one may already carry the
+# fix, so the former is refused and the latter has to be waved through.
+check_kernel() {
+	local kver major minor
+	kver=${KREL%%-*}
+	major=${kver%%.*}
+	minor=${kver#*.}; minor=${minor%%.*}
+	case "$major$minor" in
+		''|*[!0-9]*) die "cannot parse a major.minor version from kernel '$KREL'" ;;
+	esac
+	[ -n "$major" ] && [ -n "$minor" ] || die "cannot parse a major.minor version from kernel '$KREL'"
+	if [ "$major" -lt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -lt 2 ]; }; then
+		die "kernel $KREL predates 7.2; the amdgpu DC FRL code path does not exist (need linux-neptune-72 or later)"
+	fi
+	if [ "$major" -gt 7 ]; then
+		[ "${HDMI21_ALLOW_UNTESTED_KERNEL:-0}" = 1 ] \
+			|| die "kernel $KREL is newer than anything these patches were written for; set HDMI21_ALLOW_UNTESTED_KERNEL=1 to try anyway"
+		log "WARNING kernel $KREL is untested with these patches"
+	fi
+}
+check_kernel
+if [ "$CHECK_KERNEL" = 1 ]; then
+	printf 'kernel OK: %s (%s)\n' "$KREL" "$KPKG"
+	exit 0
+fi
 
 log "kernel        $KREL"
 log "kernel commit $KHASH"
@@ -339,7 +371,10 @@ else
 	for p in "${PATCHES[@]}"; do
 		log "applying      $(basename "$p")"
 		git -C "$SRC" -c user.name='steam-machine-hdmi21' \
-			-c user.email='hdmi21@localhost' am "$p"
+			-c user.email='hdmi21@localhost' am "$p" || {
+			git -C "$SRC" am --abort || true
+			die "$(basename "$p") does not apply to $TAG; this kernel may already carry the fix or need an updated patch"
+		}
 		patch_applied "$p" \
 			|| die "$(basename "$p") applied but the tree does not show its effect"
 	done
