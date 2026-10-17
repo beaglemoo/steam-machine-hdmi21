@@ -51,7 +51,11 @@ CFG
 	if [ -f "$M" ]; then echo "configured: FRL (next boot)"; else echo "configured: TMDS (next boot)"; fi
 	K=$(uname -r)
 	if [ -f "/lib/modules/$K/updates/amdgpu.ko.zst" ]; then
-		echo "amdgpu: patched override installed for $K"
+		if grep -q O /sys/module/amdgpu/taint 2>/dev/null; then
+			echo "amdgpu: patched override installed and loaded"
+		else
+			echo "amdgpu: patched override installed, not loaded yet (reboot)"
+		fi
 	else
 		echo "amdgpu: stock module (no VRR on an FRL link)"
 	fi
