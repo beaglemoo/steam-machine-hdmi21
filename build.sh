@@ -129,7 +129,10 @@ on_exit() {
 	if [ -n "$OWNER" ]; then
 		for d in "$WORK_DIR" "$OUT_DIR" "$CACHE_DIR"; do
 			case "$d" in
-				/home/*) [ -d "$d" ] && chown -R "$OWNER" "$d" ;;
+				/home/*)
+					# Only what is not already theirs: the cache is several GB.
+					[ -d "$d" ] && find "$d" \( ! -uid "${OWNER%:*}" -o ! -gid "${OWNER#*:}" \) \
+						-exec chown -h "$OWNER" {} + ;;
 			esac
 		done
 	fi
