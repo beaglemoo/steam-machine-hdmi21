@@ -67,6 +67,44 @@ log "kernel commit $KHASH"
 log "kernel package $KPKG"
 log "jobs          $JOBS"
 
+# --- directories, lock, exit handling ------------------------------------
+mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
+
+# The selfheal rebuild runs this as root while setup.sh runs it as deck, so one
+# build must not trample another, and root-run output goes back to the checkout
+# owner instead of leaving root-owned files the next deck run cannot replace.
+exec 9<"$CACHE_DIR"
+flock -w 3600 9 || die "another build holds $CACHE_DIR (journalctl -u hdmi-frl-rebuild)"
+
+OWNER=""
+if [ "$(id -u)" = 0 ]; then
+	OWNER=$(stat -c %u:%g "$REPO_DIR")
+	[ "$OWNER" != 0:0 ] || OWNER=""
+fi
+
+# One exit handler: a failure between steamos-readonly disable and enable must
+# not leave the root filesystem writable, and the build output is handed back to
+# the checkout owner. It never calls exit, so the original status is kept.
+READONLY_ARMED=0
+on_exit() {
+	set +e
+	local d
+	if [ "$READONLY_ARMED" = 1 ]; then
+		READONLY_ARMED=0
+		if [ "$(id -u)" = 0 ]; then steamos-readonly enable
+		else sudo -n steamos-readonly enable; fi
+	fi
+	if [ -n "$OWNER" ]; then
+		for d in "$WORK_DIR" "$OUT_DIR" "$CACHE_DIR"; do
+			case "$d" in
+				/home/*) [ -d "$d" ] && chown -R "$OWNER" "$d" ;;
+			esac
+		done
+	fi
+	return 0
+}
+trap on_exit EXIT
+
 # --- kernel headers and toolchain ----------------------------------------
 # An atomic update leaves the keyring directory in place but the trust database
 # stale, and every package then fails to verify with "signature from GitLab CI
@@ -91,20 +129,6 @@ pacman_sync() {
 	done
 	return 1
 }
-
-# A failure anywhere between steamos-readonly disable and enable must not leave
-# the root filesystem writable, so the exit trap puts it back.
-READONLY_ARMED=0
-on_exit() {
-	set +e
-	if [ "$READONLY_ARMED" = 1 ]; then
-		READONLY_ARMED=0
-		if [ "$(id -u)" = 0 ]; then steamos-readonly enable
-		else sudo -n steamos-readonly enable; fi
-	fi
-	return 0
-}
-trap on_exit EXIT
 
 # The headers and the compiler both live on the rootfs, which a SteamOS update
 # replaces, so this runs again from the selfheal rebuild on the first boot after
@@ -147,8 +171,6 @@ if command -v pacman >/dev/null 2>&1; then
 fi
 
 # --- source tarball ------------------------------------------------------
-mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
-
 # tar -tzf piped into an early-quitting sed makes tar die on SIGPIPE; contain
 # that inside a subshell with pipefail off.
 list_head() { ( set +o pipefail; tar -tzf "$1" | sed -n '1,400p;400q' ); }
