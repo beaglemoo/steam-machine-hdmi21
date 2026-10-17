@@ -45,6 +45,8 @@ KEEPALIVE_PID=""
 TEE_PID=""
 TARGET=""
 INSTALL_DIR=""
+STAGE_NEW=""
+STAGE_OLD=""
 
 log() { printf '[setup] %s\n' "$*"; }
 warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
@@ -80,6 +82,10 @@ on_exit() {
 	local rc=$?
 	set +e
 	[ -z "$KEEPALIVE_PID" ] || kill "$KEEPALIVE_PID" 2>/dev/null
+	# Only staging directories this run created; the old tree is removed
+	# explicitly after a good swap, and kept (not removed) if it is not empty.
+	[ -z "$STAGE_NEW" ] || rm -rf "$STAGE_NEW" 2>/dev/null || sudo -n rm -rf "$STAGE_NEW" 2>/dev/null
+	[ -z "$STAGE_OLD" ] || rmdir "$STAGE_OLD" 2>/dev/null
 	if [ "$rc" != 0 ] && [ "$STEP" -gt 0 ]; then
 		if [ "$CMD" = install ]; then
 			printf '[setup] failed at step %s; log: %s; to roll back run: bash %s/setup.sh uninstall\n' \
@@ -224,6 +230,31 @@ move_in() { # src dest: keep build output across an upgrade
 	mv "$1" "$2" 2>/dev/null || sudo mv "$1" "$2"
 }
 
+# Replace the installed copy with the staged one, carrying out/ and work/ over.
+# The old tree is parked in a directory of its own and put back if anything
+# fails, so the user's build output is never left only in a staging directory.
+swap_in() { # staged-dir
+	local d old
+	old=$(mktemp -d "$TARGET.old.XXXXXX")
+	STAGE_OLD=$old
+	mv "$TARGET" "$old/prev"
+	if move_in "$old/prev/out" "$1/out" \
+		&& move_in "$old/prev/work" "$1/work" \
+		&& mv "$1" "$TARGET"; then
+		rm -rf "$old" 2>/dev/null || sudo rm -rf "$old"
+		STAGE_OLD=""
+		return 0
+	fi
+	for d in out work; do
+		if [ -e "$1/$d" ] && [ ! -e "$old/prev/$d" ]; then
+			mv "$1/$d" "$old/prev/$d" 2>/dev/null || sudo mv "$1/$d" "$old/prev/$d" \
+				|| { STAGE_NEW=""; warn "could not move $1/$d back; it is kept in $1"; }
+		fi
+	done
+	mv "$old/prev" "$TARGET" || { STAGE_OLD=""; die "upgrade failed and the old install is in $old/prev"; }
+	die "upgrade of $TARGET failed; the previous install was put back"
+}
+
 relocate() {
 	TARGET=${DIR_ARG:-$HOME/steam-machine-hdmi21}
 	TARGET=${TARGET%/}
@@ -248,29 +279,36 @@ relocate() {
 	fi
 
 	if [ -f "$TARGET/$MARKER_FILE" ]; then
-		if [ "$DRY" = 1 ]; then
-			log "would upgrade $TARGET from $SELF_DIR, keeping out/ and work/"
-			return 0
-		fi
-		log "upgrading $TARGET from $SELF_DIR (out/ and work/ are kept)"
-		rm -rf "$TARGET.new" 2>/dev/null || sudo rm -rf "$TARGET.new"
-		rm -rf "$TARGET.old" 2>/dev/null || sudo rm -rf "$TARGET.old"
-		copy_tree "$TARGET.new"
-		move_in "$TARGET/out" "$TARGET.new/out"
-		move_in "$TARGET/work" "$TARGET.new/work"
-		mv "$TARGET" "$TARGET.old"
-		mv "$TARGET.new" "$TARGET"
-		rm -rf "$TARGET.old" 2>/dev/null || sudo rm -rf "$TARGET.old"
+		upgrade=1
 	elif [ -e "$TARGET" ]; then
 		refuse "$TARGET exists and was not created by this installer; move it or pass --dir"
 	else
-		if [ "$DRY" = 1 ]; then
-			log "would copy $SELF_DIR to $TARGET"
-			return 0
-		fi
-		log "copying $SELF_DIR to $TARGET"
-		copy_tree "$TARGET"
+		upgrade=0
 	fi
+	if [ "$DRY" = 1 ]; then
+		if [ "$upgrade" = 1 ]; then
+			log "would upgrade $TARGET from $SELF_DIR, keeping out/ and work/"
+		else
+			log "would copy $SELF_DIR to $TARGET"
+		fi
+		return 0
+	fi
+
+	# Stage next to TARGET under names mktemp picked, so a rename stays on one
+	# filesystem and nothing that already exists beside TARGET is ever touched.
+	mkdir -p "$(dirname "$TARGET")"
+	STAGE_NEW=$(mktemp -d "$TARGET.new.XXXXXX")
+	chmod 755 "$STAGE_NEW"
+	log "copying $SELF_DIR to $TARGET"
+	copy_tree "$STAGE_NEW"
+	if [ "$upgrade" = 1 ]; then
+		log "upgrading $TARGET (out/ and work/ are kept)"
+		swap_in "$STAGE_NEW"
+	else
+		[ ! -e "$TARGET" ] || refuse "$TARGET appeared while copying; move it or pass --dir"
+		mv "$STAGE_NEW" "$TARGET"
+	fi
+	STAGE_NEW=""
 	exec env HDMI21_RELOCATED=1 bash "$TARGET/setup.sh" "${ORIG_ARGS[@]}"
 }
 
