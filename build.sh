@@ -42,7 +42,7 @@ done
 as_root() {
 	if [ "$(id -u)" = 0 ]; then "$@"
 	elif sudo -n true 2>/dev/null; then sudo -n "$@"
-	else die "need root for: $*  (run build.sh as root, or pre-install ${KPKG}-headers)"
+	else die "need root for: $*  (run build.sh as root, or pre-install ${KPKG}-headers and base-devel)"
 	fi
 }
 
@@ -62,7 +62,7 @@ log "kernel commit $KHASH"
 log "kernel package $KPKG"
 log "jobs          $JOBS"
 
-# --- kernel headers ------------------------------------------------------
+# --- kernel headers and toolchain ----------------------------------------
 # An atomic update leaves the keyring directory in place but the trust database
 # stale, and every package then fails to verify with "signature from GitLab CI
 # Package Builder ... is unknown trust", so re-populate unconditionally.
@@ -87,24 +87,51 @@ pacman_sync() {
 	return 1
 }
 
-ensure_headers() {
-	[ -d "$BUILD_TREE" ] && { log "headers       $BUILD_TREE (present)"; return 0; }
-	log "headers       missing, installing $KPKG-headers"
+# A failure anywhere between steamos-readonly disable and enable must not leave
+# the root filesystem writable, so the exit trap puts it back.
+READONLY_ARMED=0
+on_exit() {
+	set +e
+	if [ "$READONLY_ARMED" = 1 ]; then
+		READONLY_ARMED=0
+		if [ "$(id -u)" = 0 ]; then steamos-readonly enable
+		else sudo -n steamos-readonly enable; fi
+	fi
+	return 0
+}
+trap on_exit EXIT
+
+# The headers and the compiler both live on the rootfs, which a SteamOS update
+# replaces, so this runs again from the selfheal rebuild on the first boot after
+# every update. The stock image ships neither gcc nor make.
+ensure_build_deps() {
+	local pkgs=()
+	[ -d "$BUILD_TREE" ] || pkgs+=("$KPKG-headers")
+	if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+		pkgs+=(base-devel)
+	fi
+	if [ ${#pkgs[@]} -eq 0 ]; then
+		log "toolchain     present ($BUILD_TREE, gcc, make)"
+		return 0
+	fi
+	log "toolchain     missing, installing ${pkgs[*]}"
+	df -h / /var 2>&1 | while IFS= read -r line; do log "              $line"; done
 	as_root steamos-readonly disable
+	READONLY_ARMED=1
 	if [ ! -d /etc/pacman.d/gnupg ]; then
 		log "initialising pacman keyring"
 		as_root pacman-key --init
 	fi
 	log "refreshing pacman trust database"
 	as_root pacman-key --populate archlinux holo
-	pacman_sync "$KPKG-headers" || {
-		as_root steamos-readonly enable
-		die "pacman could not install $KPKG-headers"
-	}
+	pacman_sync "${pkgs[@]}" || die "pacman could not install ${pkgs[*]}"
 	as_root steamos-readonly enable
+	READONLY_ARMED=0
 	[ -d "$BUILD_TREE" ] || die "$KPKG-headers installed but $BUILD_TREE still missing"
+	command -v gcc >/dev/null 2>&1 || die "base-devel installed but gcc is still missing"
+	command -v make >/dev/null 2>&1 || die "base-devel installed but make is still missing"
 }
-ensure_headers
+ensure_build_deps
 
 if command -v pacman >/dev/null 2>&1; then
 	kver=$(pacman -Q "$KPKG" 2>/dev/null | awk '{print $2}')
