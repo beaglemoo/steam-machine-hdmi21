@@ -219,10 +219,25 @@ copy_tree() { # dest
 	tar -C "$SELF_DIR" --exclude=./.git --exclude=./out --exclude=./work -cf - . \
 		| tar -C "$1" -xf -
 	printf '%s\n' "$VERSION" > "$1/$MARKER_FILE"
-	local f
+	normalise_modes "$1"
+}
+
+# A zip extraction drops the executable bits, and systemd and setup-selfheal.sh
+# refuse helpers that lack them, so fix them on every path before any step runs.
+normalise_modes() { # dir
+	local f todo=() missing=()
 	for f in $EXEC_FILES; do
-		[ ! -f "$1/$f" ] || chmod 755 "$1/$f"
+		[ ! -f "$1/$f" ] || todo+=("$1/$f")
 	done
+	[ ${#todo[@]} -gt 0 ] || return 0
+	if [ "$DRY" = 1 ]; then
+		for f in "${todo[@]}"; do
+			[ -x "$f" ] || missing+=("${f#"$1"/}")
+		done
+		[ ${#missing[@]} -eq 0 ] || log "would chmod 755: ${missing[*]}"
+		return 0
+	fi
+	chmod 755 "${todo[@]}"
 }
 
 move_in() { # src dest: keep build output across an upgrade
@@ -274,6 +289,7 @@ relocate() {
 		log "$TARGET is an existing git checkout; using it in place, nothing is copied"
 		log "update it with: git -C $TARGET pull"
 		[ -f "$TARGET/setup.sh" ] || refuse "$TARGET is a checkout without setup.sh; run git pull there first"
+		normalise_modes "$TARGET"
 		if [ "$DRY" = 1 ]; then log "would run: bash $TARGET/setup.sh ${ORIG_ARGS[*]}"; return 0; fi
 		exec bash "$TARGET/setup.sh" "${ORIG_ARGS[@]}"
 	fi
@@ -475,6 +491,7 @@ case "$CMD" in
 		preflight_basic
 		if [ "${HDMI21_RELOCATED:-0}" != 1 ]; then relocate; fi
 		start_logging
+		normalise_modes "$SELF_DIR"
 		preflight_install
 		do_install ;;
 esac
