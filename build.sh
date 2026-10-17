@@ -9,6 +9,11 @@
 # Produces out/amdgpu-<uname -r>.ko.zst and out/amdgpu-<uname -r>.ko.zst.vermagic
 set -euo pipefail
 
+# The cached bare repo is extracted by whoever ran an earlier build (root from
+# the selfheal rebuild, deck from setup.sh), so git would refuse it as a
+# dubious ownership. Trust every directory for this process only.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
+
 REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PATCH_DIR="$REPO_DIR/patches"
 
@@ -197,9 +202,17 @@ extract_repo() {
 }
 
 # Resolve the tag in a bare repo whose commit matches the running kernel.
+# Sets TAG_FOUND. Returns 1 if the repo does not contain the kernel commit (the
+# caller tries the next source) and 2 if it does but no tag leads to it. Git
+# errors are fatal and visible: an unreadable repo is not "no tag".
+TAG_FOUND=""
 resolve_tag() {
-	local bare=$1 tag
-	tag=$(git -C "$bare" tag --points-at "$KHASH" 2>/dev/null | head -1 || true)
+	local bare=$1 tag tags
+	git -C "$bare" rev-parse --git-dir >/dev/null || die "cannot read bare repo $bare"
+	git -C "$bare" rev-parse -q --verify "$KHASH^{commit}" >/dev/null || return 1
+	tags=$(git -C "$bare" tag --points-at "$KHASH") \
+		|| die "git tag --points-at $KHASH failed in $bare"
+	tag=${tags%%$'\n'*}
 	if [ -z "$tag" ]; then
 		# Fall back to the pacman-version-to-tag rule: 7.2.0.valve1 -> 7.2.0-valve1
 		local pkgver guess
@@ -209,28 +222,31 @@ resolve_tag() {
 			tag=$guess
 		fi
 	fi
-	[ -n "$tag" ] || return 1
+	[ -n "$tag" ] || return 2
 	local got
 	got=$(git -C "$bare" rev-parse --short="${#KHASH}" "$tag^{commit}")
-	[ "$got" = "$KHASH" ] || return 1
-	printf '%s\n' "$tag"
+	[ "$got" = "$KHASH" ] || return 2
+	TAG_FOUND=$tag
 }
 
-BARE=""; TAG=""
+BARE=""; TAG=""; WHY=""
 try_tarball() {
-	local tarball=$1 bare tag
+	local tarball=$1 bare rc=0
 	[ -s "$tarball" ] || return 1
 	bare=$(extract_repo "$tarball") || return 1
-	tag=$(resolve_tag "$bare") || {
-		log "              $(basename "$tarball") has no tag for $KHASH, trying the next source"
-		return 1
-	}
-	BARE=$bare; TAG=$tag; return 0
+	resolve_tag "$bare" || rc=$?
+	case "$rc" in
+		0) BARE=$bare; TAG=$TAG_FOUND; return 0 ;;
+		1) WHY="$(basename "$tarball") does not contain commit $KHASH" ;;
+		*) WHY="$(basename "$tarball") contains $KHASH but no tag points at it" ;;
+	esac
+	log "              $WHY, trying the next source"
+	return 1
 }
 
 if [ -n "$SRC_TARBALL" ]; then
 	[ -s "$SRC_TARBALL" ] || die "--src-tarball $SRC_TARBALL does not exist"
-	try_tarball "$SRC_TARBALL" || die "$SRC_TARBALL does not contain the tag for $KHASH"
+	try_tarball "$SRC_TARBALL" || die "${WHY:-$SRC_TARBALL is unusable for $KHASH}"
 else
 	mapfile -t cached_list < <(printf '%s\n' "$CACHE_DIR"/"$KPKG"-[0-9]*.src.tar.gz \
 		| grep -v -- '-devel-' | sort -V -r)
@@ -239,7 +255,7 @@ else
 	done
 	if [ -z "$BARE" ]; then
 		tb=$(download_newest)
-		try_tarball "$tb" || die "$tb does not contain the tag for $KHASH"
+		try_tarball "$tb" || die "${WHY:-$tb is unusable for $KHASH}"
 	fi
 fi
 
