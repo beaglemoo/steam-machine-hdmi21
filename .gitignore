@@ -1,3 +1,4 @@
 out/
 work/
 *.log
+.installed-by-setup

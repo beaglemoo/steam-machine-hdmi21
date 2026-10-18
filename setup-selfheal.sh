@@ -37,8 +37,10 @@ done
 [ "$DRY" = 1 ] || [ "$(id -u)" = 0 ] || die "run as root (sudo ./setup-selfheal.sh)"
 
 if [ "$REMOVE" = 1 ]; then
-	run systemctl disable --now "$UNIT"
-	run systemctl disable --now "$RESUME_UNIT"
+	# A half-installed or already removed setup has no unit files; disabling a
+	# missing unit fails, which must not stop the cleanup below.
+	if [ -f "$UNIT_PATH" ]; then run systemctl disable --now "$UNIT" || true; fi
+	if [ -f "$RESUME_UNIT_PATH" ]; then run systemctl disable --now "$RESUME_UNIT" || true; fi
 	run rm -f "$UNIT_PATH" "$RESUME_UNIT_PATH" "$KEEP_PATH"
 	run systemctl daemon-reload
 	log "self-heal removed"

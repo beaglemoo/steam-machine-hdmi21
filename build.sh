@@ -4,10 +4,18 @@
 # run from a systemd unit at boot.
 #
 #   ./build.sh [--src-tarball PATH] [--jobs N] [--cache-dir DIR]
-#              [--work-dir DIR] [--out-dir DIR]
+#              [--work-dir DIR] [--out-dir DIR] [--check-kernel]
 #
 # Produces out/amdgpu-<uname -r>.ko.zst and out/amdgpu-<uname -r>.ko.zst.vermagic
+#
+#   --check-kernel  only check that the running kernel has the FRL code path
+#                   (7.2 or later), print the result and exit
 set -euo pipefail
+
+# The cached bare repo is extracted by whoever ran an earlier build (root from
+# the selfheal rebuild, deck from setup.sh), so git would refuse it as a
+# dubious ownership. Trust every directory for this process only.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
 
 REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PATCH_DIR="$REPO_DIR/patches"
@@ -16,6 +24,7 @@ CACHE_DIR=${CACHE_DIR:-/home/deck/.cache/steam-machine-hdmi21}
 WORK_DIR=${WORK_DIR:-$REPO_DIR/work}
 OUT_DIR=${OUT_DIR:-$REPO_DIR/out}
 SRC_TARBALL=${SRC_TARBALL:-}
+CHECK_KERNEL=0
 JOBS=${JOBS:-$(nproc)}
 
 MIRROR_BASE=https://steamdeck-packages.steamos.cloud/archlinux-mirror/sources
@@ -25,7 +34,7 @@ MIRROR_REPOS="jupiter-main jupiter-3.9"
 log() { printf '[build %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { printf '[build %s] ERROR: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
-usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -34,6 +43,7 @@ while [ $# -gt 0 ]; do
 		--cache-dir) CACHE_DIR=${2:?--cache-dir needs a path}; shift 2 ;;
 		--work-dir) WORK_DIR=${2:?--work-dir needs a path}; shift 2 ;;
 		--out-dir) OUT_DIR=${2:?--out-dir needs a path}; shift 2 ;;
+		--check-kernel) CHECK_KERNEL=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown argument: $1 (see --help)" ;;
 	esac
@@ -42,7 +52,7 @@ done
 as_root() {
 	if [ "$(id -u)" = 0 ]; then "$@"
 	elif sudo -n true 2>/dev/null; then sudo -n "$@"
-	else die "need root for: $*  (run build.sh as root, or pre-install ${KPKG}-headers)"
+	else die "need root for: $*  (run build.sh as root, or pre-install ${KPKG}-headers and base-devel)"
 	fi
 }
 
@@ -52,17 +62,85 @@ case "$KREL" in
 	*-g*) KHASH=${KREL##*-g} ;;
 	*) die "kernel release '$KREL' has no -g<hash> suffix, cannot match a Valve tag" ;;
 esac
-NEPTUNE=$(printf '%s\n' "$KREL" | grep -o 'neptune-[0-9]\+' | head -1)
+NEPTUNE=$(printf '%s\n' "$KREL" | grep -o 'neptune-[0-9]\+' | head -1 || true)
 [ -n "$NEPTUNE" ] || die "kernel release '$KREL' is not a linux-neptune kernel"
 KPKG="linux-$NEPTUNE"
 BUILD_TREE="/lib/modules/$KREL/build"
+
+# The patches target the amdgpu DC FRL code path, which first appeared in 7.2.
+# An older kernel has nothing to patch and a newer one may already carry the
+# fix, so the former is refused and the latter has to be waved through.
+check_kernel() {
+	local kver major minor
+	kver=${KREL%%-*}
+	major=${kver%%.*}
+	minor=${kver#*.}; minor=${minor%%.*}
+	case "$major$minor" in
+		''|*[!0-9]*) die "cannot parse a major.minor version from kernel '$KREL'" ;;
+	esac
+	[ -n "$major" ] && [ -n "$minor" ] || die "cannot parse a major.minor version from kernel '$KREL'"
+	if [ "$major" -lt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -lt 2 ]; }; then
+		die "kernel $KREL predates 7.2; the amdgpu DC FRL code path does not exist (need linux-neptune-72 or later)"
+	fi
+	if [ "$major" -gt 7 ]; then
+		[ "${HDMI21_ALLOW_UNTESTED_KERNEL:-0}" = 1 ] \
+			|| die "kernel $KREL is newer than anything these patches were written for; set HDMI21_ALLOW_UNTESTED_KERNEL=1 to try anyway"
+		log "WARNING kernel $KREL is untested with these patches"
+	fi
+}
+check_kernel
+if [ "$CHECK_KERNEL" = 1 ]; then
+	printf 'kernel OK: %s (%s)\n' "$KREL" "$KPKG"
+	exit 0
+fi
 
 log "kernel        $KREL"
 log "kernel commit $KHASH"
 log "kernel package $KPKG"
 log "jobs          $JOBS"
 
-# --- kernel headers ------------------------------------------------------
+# --- directories, lock, exit handling ------------------------------------
+mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
+
+# The selfheal rebuild runs this as root while setup.sh runs it as deck, so one
+# build must not trample another, and root-run output goes back to the checkout
+# owner instead of leaving root-owned files the next deck run cannot replace.
+exec 9<"$CACHE_DIR"
+flock -w 3600 9 || die "another build holds $CACHE_DIR (journalctl -u hdmi-frl-rebuild)"
+
+OWNER=""
+if [ "$(id -u)" = 0 ]; then
+	OWNER=$(stat -c %u:%g "$REPO_DIR")
+	[ "$OWNER" != 0:0 ] || OWNER=""
+fi
+
+# One exit handler: a failure between steamos-readonly disable and enable must
+# not leave the root filesystem writable, and the build output is handed back to
+# the checkout owner. It never calls exit, so the original status is kept.
+READONLY_ARMED=0
+on_exit() {
+	set +e
+	local d
+	if [ "$READONLY_ARMED" = 1 ]; then
+		READONLY_ARMED=0
+		if [ "$(id -u)" = 0 ]; then steamos-readonly enable
+		else sudo -n steamos-readonly enable; fi
+	fi
+	if [ -n "$OWNER" ]; then
+		for d in "$WORK_DIR" "$OUT_DIR" "$CACHE_DIR"; do
+			case "$d" in
+				/home/*)
+					# Only what is not already theirs: the cache is several GB.
+					[ -d "$d" ] && find "$d" \( ! -uid "${OWNER%:*}" -o ! -gid "${OWNER#*:}" \) \
+						-exec chown -h "$OWNER" {} + ;;
+			esac
+		done
+	fi
+	return 0
+}
+trap on_exit EXIT
+
+# --- kernel headers and toolchain ----------------------------------------
 # An atomic update leaves the keyring directory in place but the trust database
 # stale, and every package then fails to verify with "signature from GitLab CI
 # Package Builder ... is unknown trust", so re-populate unconditionally.
@@ -87,24 +165,37 @@ pacman_sync() {
 	return 1
 }
 
-ensure_headers() {
-	[ -d "$BUILD_TREE" ] && { log "headers       $BUILD_TREE (present)"; return 0; }
-	log "headers       missing, installing $KPKG-headers"
+# The headers and the compiler both live on the rootfs, which a SteamOS update
+# replaces, so this runs again from the selfheal rebuild on the first boot after
+# every update. The stock image ships neither gcc nor make.
+ensure_build_deps() {
+	local pkgs=()
+	[ -d "$BUILD_TREE" ] || pkgs+=("$KPKG-headers")
+	if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+		pkgs+=(base-devel)
+	fi
+	if [ ${#pkgs[@]} -eq 0 ]; then
+		log "toolchain     present ($BUILD_TREE, gcc, make)"
+		return 0
+	fi
+	log "toolchain     missing, installing ${pkgs[*]}"
+	df -h / /var 2>&1 | while IFS= read -r line; do log "              $line"; done
 	as_root steamos-readonly disable
+	READONLY_ARMED=1
 	if [ ! -d /etc/pacman.d/gnupg ]; then
 		log "initialising pacman keyring"
 		as_root pacman-key --init
 	fi
 	log "refreshing pacman trust database"
 	as_root pacman-key --populate archlinux holo
-	pacman_sync "$KPKG-headers" || {
-		as_root steamos-readonly enable
-		die "pacman could not install $KPKG-headers"
-	}
+	pacman_sync "${pkgs[@]}" || die "pacman could not install ${pkgs[*]}"
 	as_root steamos-readonly enable
+	READONLY_ARMED=0
 	[ -d "$BUILD_TREE" ] || die "$KPKG-headers installed but $BUILD_TREE still missing"
+	command -v gcc >/dev/null 2>&1 || die "base-devel installed but gcc is still missing"
+	command -v make >/dev/null 2>&1 || die "base-devel installed but make is still missing"
 }
-ensure_headers
+ensure_build_deps
 
 if command -v pacman >/dev/null 2>&1; then
 	kver=$(pacman -Q "$KPKG" 2>/dev/null | awk '{print $2}')
@@ -115,8 +206,6 @@ if command -v pacman >/dev/null 2>&1; then
 fi
 
 # --- source tarball ------------------------------------------------------
-mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
-
 # tar -tzf piped into an early-quitting sed makes tar die on SIGPIPE; contain
 # that inside a subshell with pipefail off.
 list_head() { ( set +o pipefail; tar -tzf "$1" | sed -n '1,400p;400q' ); }
@@ -170,9 +259,17 @@ extract_repo() {
 }
 
 # Resolve the tag in a bare repo whose commit matches the running kernel.
+# Sets TAG_FOUND. Returns 1 if the repo does not contain the kernel commit (the
+# caller tries the next source) and 2 if it does but no tag leads to it. Git
+# errors are fatal and visible: an unreadable repo is not "no tag".
+TAG_FOUND=""
 resolve_tag() {
-	local bare=$1 tag
-	tag=$(git -C "$bare" tag --points-at "$KHASH" 2>/dev/null | head -1 || true)
+	local bare=$1 tag tags
+	git -C "$bare" rev-parse --git-dir >/dev/null || die "cannot read bare repo $bare"
+	git -C "$bare" rev-parse -q --verify "$KHASH^{commit}" >/dev/null || return 1
+	tags=$(git -C "$bare" tag --points-at "$KHASH") \
+		|| die "git tag --points-at $KHASH failed in $bare"
+	tag=${tags%%$'\n'*}
 	if [ -z "$tag" ]; then
 		# Fall back to the pacman-version-to-tag rule: 7.2.0.valve1 -> 7.2.0-valve1
 		local pkgver guess
@@ -182,28 +279,31 @@ resolve_tag() {
 			tag=$guess
 		fi
 	fi
-	[ -n "$tag" ] || return 1
+	[ -n "$tag" ] || return 2
 	local got
 	got=$(git -C "$bare" rev-parse --short="${#KHASH}" "$tag^{commit}")
-	[ "$got" = "$KHASH" ] || return 1
-	printf '%s\n' "$tag"
+	[ "$got" = "$KHASH" ] || return 2
+	TAG_FOUND=$tag
 }
 
-BARE=""; TAG=""
+BARE=""; TAG=""; WHY=""
 try_tarball() {
-	local tarball=$1 bare tag
+	local tarball=$1 bare rc=0
 	[ -s "$tarball" ] || return 1
 	bare=$(extract_repo "$tarball") || return 1
-	tag=$(resolve_tag "$bare") || {
-		log "              $(basename "$tarball") has no tag for $KHASH, trying the next source"
-		return 1
-	}
-	BARE=$bare; TAG=$tag; return 0
+	resolve_tag "$bare" || rc=$?
+	case "$rc" in
+		0) BARE=$bare; TAG=$TAG_FOUND; return 0 ;;
+		1) WHY="$(basename "$tarball") does not contain commit $KHASH" ;;
+		*) WHY="$(basename "$tarball") contains $KHASH but no tag points at it" ;;
+	esac
+	log "              $WHY, trying the next source"
+	return 1
 }
 
 if [ -n "$SRC_TARBALL" ]; then
 	[ -s "$SRC_TARBALL" ] || die "--src-tarball $SRC_TARBALL does not exist"
-	try_tarball "$SRC_TARBALL" || die "$SRC_TARBALL does not contain the tag for $KHASH"
+	try_tarball "$SRC_TARBALL" || die "${WHY:-$SRC_TARBALL is unusable for $KHASH}"
 else
 	mapfile -t cached_list < <(printf '%s\n' "$CACHE_DIR"/"$KPKG"-[0-9]*.src.tar.gz \
 		| grep -v -- '-devel-' | sort -V -r)
@@ -212,7 +312,7 @@ else
 	done
 	if [ -z "$BARE" ]; then
 		tb=$(download_newest)
-		try_tarball "$tb" || die "$tb does not contain the tag for $KHASH"
+		try_tarball "$tb" || die "${WHY:-$tb is unusable for $KHASH}"
 	fi
 fi
 
@@ -274,7 +374,10 @@ else
 	for p in "${PATCHES[@]}"; do
 		log "applying      $(basename "$p")"
 		git -C "$SRC" -c user.name='steam-machine-hdmi21' \
-			-c user.email='hdmi21@localhost' am "$p"
+			-c user.email='hdmi21@localhost' am "$p" || {
+			git -C "$SRC" am --abort || true
+			die "$(basename "$p") does not apply to $TAG; this kernel may already carry the fix or need an updated patch"
+		}
 		patch_applied "$p" \
 			|| die "$(basename "$p") applied but the tree does not show its effect"
 	done

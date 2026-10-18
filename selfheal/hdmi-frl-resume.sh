@@ -8,8 +8,9 @@
 #   --force  run one re-detect cycle even if the FRL modes are still present
 #
 # After an s2idle suspend/resume the connector's mode list loses everything
-# above the TMDS pixel clock ceiling (3840x2160@143.99 at 1332750 kHz goes, only
-# modes <= 600000 kHz remain) although the EDID is byte-identical. The link
+# above the TMDS pixel clock ceiling (3840x2160@143.99 at 1332750 kHz goes)
+# although the EDID is byte-identical. The highest surviving mode is 4K120 4:2:0
+# at 1188000 kHz over TMDS, hence the > 1200000 discriminator. The link
 # capability, not the EDID, is what was lost.
 #
 # The fix is the debugfs trigger_hotplug file. Writing 1 to it returns early
@@ -113,7 +114,7 @@ handle_connector() {
 	fi
 
 	if ! command -v modetest >/dev/null 2>&1; then
-		log "$conn: modetest is missing, cannot determine whether FRL modes are present"
+		log "WARNING: modetest (libdrm) is missing, cannot check FRL modes; restore FRL with a reboot"
 		return 0
 	fi
 

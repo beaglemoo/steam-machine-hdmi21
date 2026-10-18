@@ -1,7 +1,7 @@
 # steam-machine-hdmi21
 
 HDMI 2.1 FRL with working VRR on the Valve Steam Machine, on SteamOS kernel 7.2
-(`linux-neptune-72`).
+(`linux-neptune-72`) or later.
 
 Out of the box the Steam Machine drives an HDMI 2.1 display over TMDS, which
 caps it at 4K120 4:2:0 8-bit. Booting with `amdgpu.dcfeaturemask=0x402` turns on
@@ -10,11 +10,159 @@ What you lose in exchange is VRR, because the display driver stops recognising
 the sink as HDMI once it is running FRL, and the FRL link itself, which is
 dropped for TMDS on the first hotplug after boot. This repository contains the
 two kernel patches that fix both, a build script that produces a patched
-`amdgpu` module for the exact kernel you are running, and the glue that keeps it
-all working across SteamOS updates.
+`amdgpu` module for the exact kernel you are running, a one-step installer, and
+the glue that keeps it all working across SteamOS updates.
 
-Verified on a Steam Machine driving an LG C4 at 3840x2160 144 Hz, 10-bit 4:4:4,
-HDR, VRR 40-144 Hz, on kernel `7.2.0-valve1-1-neptune-72-gd39b4282853d`.
+## Disclaimer
+
+This is an unofficial community project. It is not affiliated with or endorsed
+by Valve. It replaces a kernel display module (`amdgpu`) on your Steam Machine;
+use it at your own risk. It is released under the GPL-2.0 with no warranty. The
+stock module is never deleted, and the Recovery section below explains how to go
+back.
+
+## Quick install
+
+### Desktop Mode
+
+Open Konsole from the application launcher and paste:
+
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi21/main/get.sh)
+```
+
+That downloads the latest release and runs the installer. Add `--ref main` to
+install the development version instead.
+
+Alternatively, download the release from GitHub, extract it in Dolphin and
+double-click "Install HDMI 2.1 FRL". KDE asks whether to trust the launcher;
+accept. If you would rather use a terminal, run
+`bash ~/Downloads/<extracted folder>/setup.sh install`.
+
+### SSH
+
+Run the same one-liner in an SSH session. Add `--yes` to take every default;
+that includes the final reboot, which drops your session:
+
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi21/main/get.sh) install --yes
+```
+
+## Requirements
+
+- A Steam Machine on SteamOS 3.9 with kernel `linux-neptune-72` or later. The
+  installer refuses older kernels, and asks for `HDMI21_ALLOW_UNTESTED_KERNEL=1`
+  on a major version above 7.
+- A sudo password for the `deck` user. Set one in Konsole with `passwd` if you
+  never have; the installer stops and tells you if none is set.
+- SSH enabled beforehand as a recovery path: `sudo systemctl enable --now sshd`.
+- About 12 GB free in `/home` (about 4 GB once the source cache exists): the
+  source cache takes about 7 GB (the 3.4 GB Valve kernel tarball plus its
+  extracted git repository) and the patched kernel checkout about 4 GB.
+- A network connection to the SteamOS package mirror.
+- Secure Boot off (the default), because the module is unsigned.
+
+## What it does
+
+`setup.sh install` runs five steps and logs everything to
+`~/steam-machine-hdmi21-setup.log`:
+
+1. Builds a patched `amdgpu` module for the running kernel (`build.sh`). This
+   installs the kernel headers and `base-devel` if they are missing, downloads
+   the Valve source, applies the two patches and compiles. The first run takes a
+   while: the download is 3.4 GB, extracting it takes a few minutes and the
+   build 2-4 minutes.
+2. Installs the module as an override in `/lib/modules/<kernel>/updates/`
+   (`install.sh`); the stock module is not touched.
+3. Installs the self-heal units (`setup-selfheal.sh`).
+4. Switches grub to the FRL mode (`hdmi-mode.sh frl`).
+5. Verifies the result and offers a reboot.
+
+The project is copied to `~/steam-machine-hdmi21`, which is where the self-heal
+units run it from. It survives SteamOS updates (see "Surviving SteamOS
+updates"), and after an update that changes the kernel it rebuilds the module by
+itself; that needs one extra reboot to load.
+
+After the reboot pick 3840x2160 at 144 Hz and turn on HDR in Steam Settings >
+Display.
+
+## Verify
+
+```
+bash ~/steam-machine-hdmi21/setup.sh status
+```
+
+shows the installed version, the running and configured mode, the units and the
+current display mode. The details:
+
+```
+cat /proc/cmdline | tr ' ' '\n' | grep dcfeaturemask      # amdgpu.dcfeaturemask=0x402
+modinfo -F vermagic amdgpu                                 # matches uname -r
+sudo cat /sys/kernel/debug/dri/0/HDMI-A-1/vrr_range        # Min: 40  Max: 144
+modetest -M amdgpu -c | grep -A2 vrr_capable               # value: 1
+sudo grep -A2 '^HPO:' /sys/kernel/debug/dri/0/amdgpu_dm_dtn_log
+```
+
+The last command prints the link state; on a working FRL link it shows the pixel
+format and bit depth, for example:
+
+```
+HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow   h_active   h_blank
+[0]:          0   Training        4:4:4      10              1       4   ACTIVE       3840        160
+```
+
+`4:4:4` at depth `10` over `4` lanes is the HDMI 2.1 FRL link. An empty
+`vrr_range` means the patched module is not loaded. On the TV, the LG C4 shows
+`4K 144Hz` and VRR active in its own signal information panel.
+
+## Uninstall
+
+Any of these:
+
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi21/main/get.sh) uninstall
+bash ~/steam-machine-hdmi21/setup.sh uninstall
+```
+
+or double-click "Uninstall HDMI 2.1 FRL" from the extracted release folder.
+
+It switches grub back to TMDS, removes the module override and the self-heal
+units, and offers to delete the build cache (about 7 GB) and the install
+directory. The kernel headers and `base-devel` it installed stay until the next
+SteamOS update, and the log stays. Reboot afterwards to load the stock module.
+
+## Recovery
+
+If something goes wrong, over SSH or in a Konsole in Desktop Mode run:
+
+```
+bash ~/steam-machine-hdmi21/setup.sh uninstall
+```
+
+For a quicker way back to a working display that keeps the module installed but
+returns to TMDS (4K120 4:2:0, VRR still works on the stock path):
+
+```
+sudo sh ~/steam-machine-hdmi21/hdmi-mode.sh tmds && sudo reboot
+```
+
+## Tested on
+
+| Hardware | Display | Kernel |
+| --- | --- | --- |
+| Steam Machine "Fremont" | LG C4 83" | 7.2.4-valve1 |
+| Steam Machine "Fremont" | LG C4 83" | 7.2.7-valve1 |
+| Steam Machine "Fremont" | LG C4 83" | 7.2.7-valve2 |
+
+At 3840x2160 144 Hz, 10-bit 4:4:4, HDR, VRR 40-144 Hz. Reports for other TVs and
+monitors are welcome as GitHub issues.
+
+## Credits
+
+All credit for the HDMI FRL and VRR work goes to Tomasz Pakula (Lawstorant); the
+fix-up this repository packages is his commit `21d564d5a1`. The hotplug fix is
+based on AMD commit `c953b39f9487` by Ivan Lipski. This repository only packages
+their work for SteamOS.
 
 ## The problem
 
@@ -100,21 +248,14 @@ The trade-off is that a hotplug now tears the link down and retrains it, so the
 output blanks for a moment where it used to stay lit at the wrong rate. That is
 mainline behaviour, and it is what buys 4K144 back instead of 4K120 4:2:0.
 
-## Requirements
+## How the build works
 
-- A Steam Machine (or another SteamOS 3.9 device) on `linux-neptune-72`.
-- `linux-neptune-72-headers` matching the running kernel. `build.sh` installs it
-  if it is missing.
-- About 8 GB free in the cache directory: the Valve kernel source tarball is
-  3.4 GB and its extracted git repository is another 3.5 GB.
-- Secure Boot off (the default), because the module is unsigned.
-
-## Quick start
+`setup.sh` is a wrapper around the scripts below. You can run them by hand
+instead, from a clone (a downloaded zip loses the executable bits):
 
 ```
-cd /home/deck
-git clone <this repo> steam-machine-hdmi21
-cd steam-machine-hdmi21
+git clone https://github.com/beaglemoo/steam-machine-hdmi21 ~/steam-machine-hdmi21
+cd ~/steam-machine-hdmi21
 ./build.sh                    # ~2 min build, plus the source download the first time
 sudo ./install.sh
 sudo ./setup-selfheal.sh
@@ -122,20 +263,29 @@ sudo ./hdmi-mode.sh frl
 sudo reboot
 ```
 
-After the reboot, pick 3840x2160 at 144 Hz in Steam's display settings (Steam
-defaults to 120 Hz) and turn HDR on.
+`setup.sh install` uses an existing git checkout in `~/steam-machine-hdmi21` in
+place and never overwrites it; update it with `git pull`.
 
-`build.sh` is unattended and idempotent. It detects the running kernel, works
-out which `linux-neptune-NN` package it came from, downloads the newest matching
-source tarball from the SteamOS mirror into
+`build.sh` is unattended and idempotent. It detects the running kernel, checks
+that it is 7.2 or later (`--check-kernel` does only this), works out which
+`linux-neptune-NN` package it came from, installs `linux-neptune-NN-headers` and
+`base-devel` (the stock image has no `gcc` or `make`) if they are missing,
+downloads the newest matching source tarball from the SteamOS mirror into
 `/home/deck/.cache/steam-machine-hdmi21/`, extracts only the bare git repository
 from it, checks out the tag whose commit hash matches the `-g` suffix of
 `uname -r`, applies every patch in `patches/` in name order with `git am`, and
 builds just the amdgpu module out of tree. Each patch has a sanity check on the
 resulting tree; an existing `work/src` that is missing one (a checkout made
-before the patch was added) is discarded and rebuilt from the tag. The result lands in `out/amdgpu-$(uname -r).ko.zst` with a
-`.vermagic` sidecar. Useful flags: `--src-tarball PATH` to use a tarball you
-already have, `--jobs N`, `--cache-dir DIR`, `--out-dir DIR`.
+before the patch was added) is discarded and rebuilt from the tag. The result
+lands in `out/amdgpu-$(uname -r).ko.zst` with a `.vermagic` sidecar. Useful
+flags: `--src-tarball PATH` to use a tarball you already have, `--jobs N`,
+`--cache-dir DIR`, `--out-dir DIR`.
+
+The headers and `base-devel` live on the root filesystem, which a SteamOS update
+replaces, so the build installs them again on the first boot after every update.
+Builds take a lock on the cache directory, so two cannot run at once, and when
+`build.sh` runs as root (the self-heal rebuild) it hands its output back to the
+owner of the checkout.
 
 The build is deliberately out of tree. SteamOS has no glibc headers, so the
 kernel host tools (`fixdep`, `modpost`, `kconfig`) cannot be compiled and an
@@ -151,7 +301,8 @@ with the read-only root temporarily disabled, runs `depmod -a`, checks that
 refuses to install a module whose vermagic does not match the running kernel.
 `--dry-run` prints everything it would do without touching the system. The stock
 module under `kernel/drivers/gpu/drm/amd/amdgpu/` is never modified, so the
-change is fully reversible.
+change is fully reversible. `uninstall.sh` deletes only that one file and re-runs
+`depmod` and `mkinitcpio`, so the stock module takes over again.
 
 `hdmi-mode.sh` switches the link mode:
 
@@ -160,44 +311,10 @@ change is fully reversible.
   creates the marker file `~/.hdmi-frl-enabled`, and runs `update-grub`.
 - `sudo ./hdmi-mode.sh tmds` removes both and regenerates grub.
 - `./hdmi-mode.sh status` reports the running mode, the configured mode, whether
-  the patched module is installed, and the current mode line.
+  the patched module is installed and loaded, and the current mode line.
 
 Both need a reboot. `STATE_DIR` overrides where the marker file lives; by
 default it is the home directory of the user who ran sudo.
-
-## Verifying
-
-```
-cat /proc/cmdline | tr ' ' '\n' | grep dcfeaturemask      # amdgpu.dcfeaturemask=0x402
-modinfo -F vermagic amdgpu                                 # matches uname -r
-sudo cat /sys/kernel/debug/dri/0/HDMI-A-1/vrr_range        # Min: 40  Max: 144
-modetest -M amdgpu -c | grep -A2 vrr_capable               # value: 1
-sudo grep -A2 '^HPO:' /sys/kernel/debug/dri/0/amdgpu_dm_dtn_log
-```
-
-The last command prints the link state; on a working FRL link it shows the pixel
-format and bit depth, for example:
-
-```
-HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow   h_active   h_blank
-[0]:          0   Training        4:4:4      10              1       4   ACTIVE       3840        160
-```
-
-`4:4:4` at depth `10` over `4` lanes is the HDMI 2.1 FRL link. An empty
-`vrr_range` means the patched module is not loaded. On the TV, the LG C4 shows
-`4K 144Hz` and VRR active in its own signal information panel.
-
-## Reverting
-
-```
-sudo ./hdmi-mode.sh tmds     # back to TMDS: 4K120 4:2:0, VRR works on the stock module
-sudo ./uninstall.sh          # remove the patched module override
-sudo ./setup-selfheal.sh --remove
-sudo reboot
-```
-
-`uninstall.sh` deletes only `/lib/modules/$(uname -r)/updates/amdgpu.ko.zst` and
-re-runs `depmod` and `mkinitcpio`, so the stock module takes over again.
 
 ## Surviving SteamOS updates
 
@@ -237,9 +354,11 @@ Check on it with `systemctl status hdmi-frl-grub.service` and
 
 An s2idle suspend/resume comes back with the FRL modes gone. The connector's
 mode list loses everything above the TMDS pixel clock ceiling -- 3840x2160 at
-143.99 Hz is 1332750 kHz and disappears, leaving only modes at or below 600000
-kHz -- even though the EDID read back from the TV is byte-identical. What was
-lost is the FRL link capability, not the EDID.
+143.99 Hz is 1332750 kHz and disappears -- even though the EDID read back from
+the TV is byte-identical. The highest mode that remains is 4K120 4:2:0 at
+1188000 kHz over TMDS, which is why the script treats anything above 1,200,000
+kHz as proof that the FRL link is up. What was lost is the FRL link capability,
+not the EDID.
 
 `selfheal/hdmi-frl-resume.sh` was written to force a re-detect through the
 debugfs file `/sys/kernel/debug/dri/0/HDMI-A-1/trigger_hotplug`: writing `1`
@@ -304,6 +423,10 @@ cycle itself was verified.
 ## Layout
 
 ```
+setup.sh                    one-step installer: install | uninstall | status
+get.sh                      bootstrap: downloads a release and runs setup.sh
+hdmi21-install.desktop      Desktop Mode launcher for setup.sh install
+hdmi21-uninstall.desktop    Desktop Mode launcher for setup.sh uninstall
 build.sh                    build a patched amdgpu.ko.zst for the running kernel
 install.sh                  install it into /lib/modules/<kernel>/updates/
 uninstall.sh                remove it again
@@ -311,6 +434,8 @@ hdmi-mode.sh                frl | tmds | status
 setup-selfheal.sh           install and enable the boot-time self-heal
 patches/                    the two kernel patches, git format-patch style
 selfheal/                   the self-heal scripts, their units, and the atomic keep list
+VERSION                     release version
+CHANGELOG.md                what changed in each release
 out/                        build output (not tracked)
 work/                       patched kernel checkout (not tracked)
 ```
