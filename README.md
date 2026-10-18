@@ -133,6 +133,41 @@ HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow 
 `vrr_range` means the patched module is not loaded. On the TV, the LG C4 shows
 `4K 144Hz` and VRR active in its own signal information panel.
 
+### Status as JSON
+
+```
+bash ~/steam-machine-hdmi21/setup.sh status --json [--dir DIR]
+```
+
+prints one JSON object (schema 1) on stdout and nothing else, for tools such as
+a Decky plugin. It changes nothing, exits 0 whenever it prints the object, and
+puts problems it noticed into `warnings`. It reads the install and state
+directories from `hdmi-frl-grub.service`, so it gives the same answer run as
+root or as `deck`; some fields need root (the VRR range) or the journal. `--json`
+with `install` or `uninstall` is a usage error (exit 2). Text is reduced to
+printable ASCII. A value that cannot be read is `null` (or `false` for a flag,
+or `""` for a unit state).
+
+| Field | Meaning |
+| --- | --- |
+| `schema`, `version`, `generated_at`, `boot_id`, `as_root` | Schema number, `VERSION`, epoch seconds, `/proc/sys/kernel/random/boot_id`, whether it ran as root |
+| `install_dir`, `state_dir` | Unit `HDMI_FRL_REPO` (else `--dir`, else the script's own directory); unit `STATE_DIR` (else `$STATE_DIR`, the sudo user's home, the install dir owner's home, `$HOME`) |
+| `installed`, `kernel` | `hdmi-frl-grub.service` exists; `uname -r` |
+| `build` | `module`: `out/amdgpu-<kernel>.ko.zst` exists; `vermagic`; `matches_kernel` |
+| `mode` | `running` (`FRL` if bit `0x400` is set in the last `amdgpu.dcfeaturemask` on the cmdline), `cmdline_mask`, `configured` (marker file present = `FRL`), `marker`, `dropin` (grub drop-in), `consistent` (marker and drop-in agree) |
+| `module` | `installed` override in `updates/`, its `installed_vermagic` and `installed_matches_kernel`, `resolves_to_updates`, `loaded`, `taint_o`, `srcversion_match` (loaded vs installed, `null` if unknown), `installed_after_boot`, and `state`: `patched-loaded`, `installed-needs-reboot` or `stock` |
+| `display` | `connector`, `connected`, `current_mode` (`width`, `height`, `refresh_hz`, `name`), `max_pixel_clock_khz`, `frl_modes_present` (a mode above 1,200,000 kHz), `sink_frl` (the EDID advertises "Max Fixed Rate Link") |
+| `vrr` | `capable` (`vrr_capable` property) and `range` (`min_hz`, `max_hz` from debugfs, root only; `null` when 0 to 0) |
+| `units` | `hdmi-frl-grub`, `hdmi-frl-resume`, `hdmi-frl-rebuild`, each with `load`, `enabled`, `active`, `sub`, `result`; the rebuild unit disappears once it has finished |
+| `rebuild` | `state`: `idle`, `running`, `succeeded-needs-reboot` or `failed`, read from this boot's journal; `last_line`, `source_unit`, `log_command` |
+| `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`; `reboot_reason` is the same in words |
+| `tools` | `modetest`, `edid_decode` present; `journal_readable` |
+| `warnings` | Strings; empty when everything could be read |
+
+The rebuild log is `journalctl -b -u hdmi-frl-rebuild -u hdmi-frl-grub`. When the
+transient rebuild unit could not be started, the boot unit rebuilds inline and
+`source_unit` is `hdmi-frl-grub`.
+
 ## Uninstall
 
 Any of these:

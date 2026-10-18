@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - unreleased
+
+### Added
+
+- `setup.sh status --json` prints the whole state (build, mode, module,
+  display, VRR, units, rebuild progress, reboot reasons) as one JSON object for
+  tools such as a Decky plugin. Plain `status` is unchanged.
+
 ## [1.0.1] - 2026-10-23
 
 ### Fixed
