@@ -56,9 +56,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi
 - A sudo password for the `deck` user. Set one in Konsole with `passwd` if you
   never have; the installer stops and tells you if none is set.
 - SSH enabled beforehand as a recovery path: `sudo systemctl enable --now sshd`.
-- About 10 GB free in `/home` (about 4 GB once the source cache exists): the
-  Valve kernel source tarball is 3.4 GB and its extracted git repository is
-  another 3.5 GB.
+- About 12 GB free in `/home` (about 4 GB once the source cache exists): the
+  source cache takes about 7 GB (the 3.4 GB Valve kernel tarball plus its
+  extracted git repository) and the patched kernel checkout about 4 GB.
 - A network connection to the SteamOS package mirror.
 - Secure Boot off (the default), because the module is unsigned.
 

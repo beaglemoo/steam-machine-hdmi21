@@ -166,7 +166,7 @@ preflight_basic() {
 
 # 4-10: install only, run once the scripts are in their final place.
 preflight_install() {
-	local krel have_deps=1 have_cache=0 avail need=10 net_ok=1
+	local krel have_deps=1 have_cache=0 avail need=12 net_ok=1
 	krel=$(uname -r)
 
 	bash "$SELF_DIR/build.sh" --check-kernel || refuse "this kernel is not supported (see above)"
