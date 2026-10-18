@@ -583,6 +583,15 @@ frl_mask_has() { # mask
 	( if (( ($1 & 0x400) != 0 )); then exit 0; else exit 1; fi ) 2>/dev/null
 }
 
+# This boot's output of the unit's own processes. A plain -u would also return
+# the messages systemd (PID 1) logs about the unit ("Deactivated successfully."),
+# which are not the last line of the script; the _SYSTEMD_UNIT match is not.
+unit_journal() { # unit
+	local n=$1
+	case "$n" in *.*) ;; *) n=$n.service ;; esac
+	t5 journalctl -b "_SYSTEMD_UNIT=$n" -o cat -q --no-pager 2>/dev/null
+}
+
 # Sets UJ to the unit object and UJ_ACTIVE to its ActiveState. A transient unit
 # that has finished is gone (--collect): LoadState not-found is normal.
 unit_json() { # unit
@@ -779,9 +788,9 @@ EOF
 		[ -n "$jout" ] && jreadable=1
 	fi
 	if [ "$jreadable" = 1 ]; then
-		grubj=$(t5 journalctl -b -u hdmi-frl-grub -o cat -q --no-pager 2>/dev/null || true)
+		grubj=$(unit_journal hdmi-frl-grub || true)
 		case "$grubj" in *"rebuilding inline"*) src=hdmi-frl-grub ;; esac
-		jout=$(t5 journalctl -b -u "$src" -o cat -q --no-pager 2>/dev/null | awk '/^hdmi-frl: / { h = $0 } NF { l = $0 } END { print h; print l }') || true
+		jout=$(unit_journal "$src" | awk '/^hdmi-frl: / { h = $0 } NF { l = $0 } END { print h; print l }') || true
 		rb_h=$(printf '%s\n' "$jout" | sed -n 1p)
 		rb_l=$(printf '%s\n' "$jout" | sed -n 2p)
 		rb_l=${rb_l:0:300}
