@@ -48,6 +48,15 @@ that includes the final reboot, which drops your session:
 bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi21/main/get.sh) install --yes
 ```
 
+### That is the whole install
+
+The installer does everything: it builds the module with both patches (VRR and
+the hotplug fix, patch 0002), installs it, sets up the self-heal and switches
+grub to FRL. There is nothing else to run afterwards. The rest of this README
+explains how the fix works and how to do each step by hand; you do not need any
+of it for a normal install. In particular, do not run `setup-selfheal.sh` or the
+other scripts yourself after `setup.sh install`; it has already run them.
+
 ## Requirements
 
 - A Steam Machine on SteamOS 3.9 with kernel `linux-neptune-72` or later. The
@@ -250,8 +259,10 @@ mainline behaviour, and it is what buys 4K144 back instead of 4K120 4:2:0.
 
 ## How the build works
 
-`setup.sh` is a wrapper around the scripts below. You can run them by hand
-instead, from a clone (a downloaded zip loses the executable bits):
+`setup.sh` is a wrapper around the scripts below. You only need them if you
+want to install by hand instead of with `setup.sh`; the one-line install has
+already run all of them. To run them by hand, use a clone (a downloaded zip
+loses the executable bits):
 
 ```
 git clone https://github.com/beaglemoo/steam-machine-hdmi21 ~/steam-machine-hdmi21
@@ -369,7 +380,8 @@ re-detect does run, but the `skip_frl_pretraining` gate described above turns it
 into a non-destructive verify, which can only bring the link back as TMDS. The
 lost FRL modes after a resume are that same bug, not a separate one.
 
-Patch 0002 is the fix: with it the driver verifies the link capability
+Patch 0002 is the fix, and the installer always includes it: with it the
+driver verifies the link capability
 destructively on every hotplug, including the one after a resume, and the FRL
 modes come back on their own.
 
@@ -397,11 +409,26 @@ journalctl -u hdmi-frl-resume.service -b
 `--force` runs one cycle even when the FRL modes are present, which is how the
 cycle itself was verified.
 
+Sleep and wake with patch 0002 has not been tested as thoroughly as TV standby
+and input switches. One report (an LG C9) has the screen blanking several times
+after a resume before FRL settles. The cause is not known yet; one suspect is
+the resume unit firing while the TV is still waking. To rule it out, turn the
+unit off and try a few sleep/wake cycles:
+
+```
+sudo systemctl disable hdmi-frl-resume.service    # turn it back on with enable
+```
+
+If you see this, please add the output of `journalctl -b -u
+hdmi-frl-resume.service` to the issue tracker.
+
 ## Known limitations
 
 - The module is built out of tree and is unsigned. It taints the kernel with
   `O` and `E`. Secure Boot is off on SteamOS and `CONFIG_MODULE_SIG_FORCE` is
   not set, so it loads normally.
+- Sleep/wake: the screen can blank several times after a resume before FRL
+  settles (seen on an LG C9). See "After resume".
 - A SteamOS update that changes the kernel means a rebuild. That is automatic
   with the self-heal installed, but it needs a working network connection and a
   second reboot.
