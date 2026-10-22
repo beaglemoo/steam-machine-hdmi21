@@ -1,0 +1,63 @@
+Encoders:
+id	crtc	type	possible crtcs	possible clones	
+231	85	TMDS	0x0000000f	0x00000000
+233	87	TMDS	0x0000000f	0x00000000
+
+Connectors:
+id	encoder	status		name		size (mm)	modes	encoders
+232	231	connected	HDMI-A-1       	1220x680		3	231
+  modes:
+	index name refresh (Hz) hdisp hss hse htot vdisp vss vse vtot
+  #0 3840x2160 120.00 3840 4016 4104 4400 2160 2168 2178 2250 1188000 flags: phsync, pvsync; type: preferred, driver
+  #1 3840x2160 60.00 3840 4016 4104 4400 2160 2168 2178 2250 594000 flags: phsync, pvsync; type: driver
+  #2 1920x1080 60.00 1920 2008 2052 2200 1080 1084 1089 1125 148500 flags: phsync, pvsync; type: driver
+  props:
+	1 EDID:
+		flags: immutable blob
+		blobs:
+
+		value:
+			00ffffffffffff001e6d0b5a01010101
+			0123010380a05a78ea0541a2574a9c25
+	2 DPMS:
+		flags: enum
+		enums: On=0 Standby=1 Suspend=2 Off=3
+		value: 0
+234	233	connected	DP-1           	600x340		2	233
+  modes:
+	index name refresh (Hz) hdisp hss hse htot vdisp vss vse vtot
+  #0 3840x2160 143.99 3840 3888 3920 4000 2160 2163 2168 2314 1332750 flags: phsync, pvsync; type: preferred, driver
+  #1 2560x1440 59.95 2560 2608 2640 2720 1440 1443 1448 1481 241500 flags: phsync, pvsync; type: driver
+  props:
+	2 DPMS:
+		flags: enum
+		enums: On=0 Standby=1 Suspend=2 Off=3
+		value: 0
+
+CRTCs:
+id	fb	pos	size
+85	142	(0,0)	(3840x2160)
+  #0 3840x2160 120.00 3840 4016 4104 4400 2160 2168 2178 2250 1188000 flags: phsync, pvsync; type: preferred, driver
+  props:
+	24 ACTIVE:
+		flags: range
+		values: 0 1
+		value: 1
+	25 MODE_ID:
+		flags: blob
+		blobs:
+
+		value:
+			0040ed0000100f1000
+87	143	(0,0)	(3840x2160)
+  #0 3840x2160 143.99 3840 3888 3920 4000 2160 2163 2168 2314 1332750 flags: phsync, pvsync; type: preferred, driver
+  props:
+	24 ACTIVE:
+		flags: range
+		values: 0 1
+		value: 1
+
+Planes:
+id	crtc	fb	CRTC x,y	x,y	gamma size	possible crtcs
+70	85	142	0,0		0,0	0          	0x0000000f
+  formats: XR24 AR24
