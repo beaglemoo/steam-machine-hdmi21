@@ -31,8 +31,9 @@
 # after a resume. Writing 0 tears the link down (releases the local sink, sets
 # the link type to none); the following 1 is then a real disconnected-to-
 # connected detect, which re-reads the FRL link capability. Neither write emits
-# a uevent, so a successful restore is followed by a synthetic one for the
-# compositor.
+# a uevent, and the compositor needs one to re-read the connector and switch to
+# an FRL stream, so every cycle is followed by a synthetic one before the link
+# state is read again.
 #
 # Only acts while the FRL mask (bit 0x400 of amdgpu.dcfeaturemask) is on the
 # kernel cmdline; the TMDS configuration has nothing to restore.
@@ -181,6 +182,17 @@ redetect() {
 	sleep 5
 }
 
+# Neither hotplug write emits a uevent and the compositor does not re-read the
+# connector without one, so this has to come before the link state is read.
+emit_change() { # card, connector
+	if udevadm trigger --action=change --subsystem-match=drm \
+		--sysname-match="card$1" 2>/dev/null; then
+		log "$2: emitted a change uevent on card$1"
+	else
+		log "$2: could not emit a change uevent on card$1 (ignored)"
+	fi
+}
+
 log_hpo_rows() { # connector
 	local row
 	[ -n "$HPO_ROWS" ] || return 0
@@ -246,17 +258,12 @@ handle_connector() {
 	for (( i = 1; i <= ATTEMPTS; i++ )); do
 		log "$conn: re-detect attempt $i/$ATTEMPTS (0 then 1 to $hotplug)"
 		redetect "$hotplug"
+		emit_change "$card" "$conn"
 		poll_link_state "$card" "$sysname" "$REDETECT_WAIT" "$conn"
 		case "$STATE" in
 			frl)
 				log "$conn: FRL link restored"
 				log_hpo_rows "$conn"
-				if udevadm trigger --action=change --subsystem-match=drm \
-					--sysname-match="card$card" 2>/dev/null; then
-					log "$conn: emitted a change uevent on card$card"
-				else
-					log "$conn: could not emit a change uevent on card$card (ignored)"
-				fi
 				return 0 ;;
 			tmds)
 				log "$conn: still TMDS after attempt $i" ;;
