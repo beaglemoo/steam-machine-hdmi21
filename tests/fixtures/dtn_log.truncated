@@ -1,0 +1,5 @@
+[dtn begin]
+HUBBUB WM:      data_urgent  pte_meta_urgent         sr_enter          sr_exit    dram_clk_change
+WM_Set[0]:                0                0                0                0                  0
+
+HUBP:  format  addr_hi  width  height  rot  mir  sw_mode  dcc_en  blank_en  clock_en  ttu_dis  underflow   min_ttu_vblank       qos_low_wm      qos_high_wm
