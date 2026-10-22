@@ -224,7 +224,7 @@ preflight_install() {
 		fi
 	fi
 
-	command -v modetest >/dev/null 2>&1 || warn "modetest (libdrm) is missing; status cannot read the current mode"
+	command -v modetest >/dev/null 2>&1 || warn "modetest (libdrm) is missing; status and the resume self-heal cannot read modes"
 	command -v edid-decode >/dev/null 2>&1 || warn "edid-decode (v4l-utils) is missing; the resume self-heal cannot check the sink"
 
 	if systemctl is-active -q hdmi-frl-rebuild 2>/dev/null; then
