@@ -412,5 +412,7 @@ VERMAGIC=$(modinfo -F vermagic "$ZST")
 [ "${VERMAGIC%% *}" = "$KREL" ] \
 	|| die "vermagic '$VERMAGIC' does not match the running kernel $KREL"
 printf '%s\n' "$VERMAGIC" > "$ZST.vermagic"
+# What setup.sh compares to decide whether this module is still current.
+cat "${PATCHES[@]}" | sha256sum | cut -d' ' -f1 > "$ZST.patches"
 log "vermagic      $VERMAGIC"
 log "done          $ZST"
