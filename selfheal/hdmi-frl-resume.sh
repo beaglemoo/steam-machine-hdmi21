@@ -8,23 +8,36 @@
 #   --force  run one re-detect cycle even if the FRL link is up or unreadable
 #
 # After an s2idle suspend/resume the link can come back as TMDS although the
-# EDID is byte-identical: the FRL link capability, not the EDID, is lost. On a
-# TV that tops out at 144 Hz the mode list shows it (3840x2160@143.99 is
-# 1332750 kHz and disappears), but a 120 Hz TV such as the LG C9 lists 4K120 at
-# 1188000 kHz over FRL and over TMDS 4:2:0 alike, so the mode list cannot tell
-# the two apart. The script therefore asks the driver which link it is running.
+# EDID is byte-identical: the FRL link capability, not the EDID, is lost. The
+# mode list alone cannot show it on every TV (a 120 Hz TV such as the LG C9
+# lists 4K120 at 1188000 kHz over FRL and over TMDS 4:2:0 alike), and neither
+# can the driver's link state alone (an FRL-capable TV that runs a TMDS-sized
+# mode on purpose, such as 4K60, has no FRL encoder either). So the link is
+# classified from three inputs, first match wins:
 #
-# amdgpu_dm_dtn_log (debugfs, read as root) is the driver's hardware state
-# dump. Its "HPO:" table lists the active HDMI FRL stream encoders and is only
-# printed when one is enabled, so a row there means FRL and a complete dump
-# that drives an output but has no such table means TMDS. Anything else (file
-# unreadable, dump cut short, nothing lit yet, connector not enabled) is
-# reported as unknown, and unknown never touches the link.
+#   1. hpo-row      the "HPO:" table of amdgpu_dm_dtn_log (debugfs, root) has a
+#                   row. The driver prints it only while an HDMI FRL stream
+#                   encoder is active, so the link is FRL right now.
+#   2. mode-list    the connector lists a mode above 1200000 kHz (modetest).
+#                   TMDS tops out at 600 MHz and 4:2:0 halves that, so only an
+#                   FRL-capable link can offer one: the capability is intact.
+#   3. active mode  the dump is complete, shows an OTG row and no HPO row, and
+#                   the CRTC driving the connector runs a mode above 600000 kHz.
+#                   Above 600 MHz TMDS can carry a mode only as 4:2:0 and FRL
+#                   always uses the HPO encoder, so a 4K120 stream without HPO
+#                   is the lost-FRL fallback. This is the only "tmds" verdict.
+#
+# Rules 1 and 2 give "frl", rule 3 gives "tmds" (FRL lost, recovery warranted),
+# everything else gives "unknown" and nothing is touched. That includes a 120 Hz
+# TV running 4K60 or lower, an incomplete dump, an unreadable file and a missing
+# modetest. Deliberately fail safe: a lost link on a 120 Hz TV can only be seen
+# while it is driving a mode above 600 MHz, and a missed recovery costs less
+# than blanking the screen on a guess.
 #
 # The TV is often still waking when this runs and patch 0002 retrains FRL on
 # the resume hotplug by itself, so the link is polled for up to FRL_WAIT
 # seconds first; if it comes up the script only logs and exits. Only a link
-# that is still TMDS after that wait is re-detected.
+# that is still "tmds" after that is re-detected.
 #
 # The fix is the debugfs trigger_hotplug file. Writing 1 to it returns early
 # while the connector already reads connected, so on its own it does nothing
@@ -42,6 +55,8 @@ set -euo pipefail
 CHECK=0
 FORCE=0
 
+TMDS_MAX_KHZ=600000	# a TMDS link carries nothing faster than this except as 4:2:0
+FRL_ONLY_KHZ=1200000	# a mode above this exists only over FRL (4K144 is 1332750)
 CONNECT_WAIT=60		# seconds to wait for the sink to come back
 FRL_WAIT=20		# seconds to wait for the driver to bring FRL up by itself
 REDETECT_WAIT=10	# seconds to wait for FRL after each re-detect cycle
@@ -55,7 +70,13 @@ DRM_SYSFS=${HDMI_FRL_TEST_SYSFS:-/sys/class/drm}
 DEBUGFS=${HDMI_FRL_TEST_DEBUGFS:-/sys/kernel/debug/dri}
 
 STATE=unknown		# set by read_link_state: frl, tmds or unknown
-WHY=""			# why STATE is what it is, for the log
+RULE=""			# which rule decided STATE
+INPUTS=""		# what the rule saw, for the log
+DUMP=incomplete		# dtn_log verdict: hpo, nohpo or incomplete
+DUMP_WHY=""		# why DUMP is incomplete, when it is
+MAX_KHZ=0		# highest mode clock the connector lists
+ACTIVE_KHZ=0		# clock of the mode its CRTC runs, 0 if none
+MODETEST_OK=0		# 1 when modetest ran
 HPO_ROWS=""		# the HPO table rows of the last read, if any
 
 log() { printf 'hdmi-frl-resume: %s\n' "$*"; }
@@ -72,11 +93,11 @@ frl_mask_set() {
 
 # --- link state -----------------------------------------------------------
 # Reads a dtn_log dump on stdin. "rows" prints the HPO table rows, anything
-# else prints the verdict:
-#   frl      at least one row under the "HPO:" header
-#   tmds     no such row, but the dump is complete ([dtn begin] and [dtn end])
-#            and an OTG row shows that something is being driven
-#   unknown  everything else
+# else prints the verdict on the dump:
+#   hpo         at least one row under the "HPO:" header
+#   nohpo       no such row, but the dump is complete ([dtn begin] and
+#               [dtn end]) and an OTG row shows that something is being driven
+#   incomplete  everything else
 # A header is only recognised at the start of a line, so the "DP HPO S_ENC:"
 # and "DP HPO L_ENC:" tables of a DisplayPort output do not count. The Link
 # column is ignored: a healthy FRL link has been seen reading "Training".
@@ -95,58 +116,112 @@ classify_dtn_log() { # [rows]
 		{ sect = "" }
 		END {
 			if (want == "rows") { if (rows != "") print rows; exit }
-			if (hpo > 0) print "frl"
-			else if (begin && end && otg > 0) print "tmds"
-			else print "unknown"
+			if (hpo > 0) print "hpo"
+			else if (begin && end && otg > 0) print "nohpo"
+			else print "incomplete"
 		}
 	'
 }
 
-# Sets STATE, WHY and HPO_ROWS from the driver for one connector.
-# $1 = card number, $2 = sysfs name (card0-HDMI-A-1)
+# Reads modetest -e -c -p on stdin and prints "<highest> <active>" in kHz for
+# connector $1: the highest clock among its modes, and the clock of the mode on
+# the CRTC its encoder is bound to (0 when there is none). The layout is
+# libdrm's tests/modetest/modetest.c:
+#   Encoders:   id <tab> crtc <tab> type <tab> possible crtcs <tab> clones
+#   Connectors: id <tab> encoder <tab> status <tab> name <tab> size ...
+#                 #N name refresh hdisp hss hse htot vdisp vss vse vtot clock flags: ...
+#   CRTCs:      id <tab> fb <tab> (x,y) <tab> (WxH)
+#                 #0 name refresh ... vtot clock flags: ...
+# The clock is the last field before "flags:". It is taken from there rather
+# than by position because an idle CRTC prints an empty mode name, which shifts
+# every field.
+modetest_clocks() {
+	awk -v conn="$1" '
+		function clk(   line, n, f) {
+			line = $0; sub(/ flags:.*/, "", line)
+			n = split(line, f, " ")
+			return f[n] + 0
+		}
+		/^Encoders:/ { sect = "enc"; next }
+		/^Connectors:/ { sect = "conn"; next }
+		/^CRTCs:/ { sect = "crtc"; next }
+		/^Planes:/ { sect = "plane"; next }
+		sect == "enc" && $1 ~ /^[0-9]+$/ && NF >= 3 { enc[$1] = $2; next }
+		sect == "conn" && $1 ~ /^[0-9]+$/ && ($3 == "connected" || $3 == "disconnected" || $3 == "unknown") {
+			want = ($4 == conn)
+			if (want) cenc = $2
+			next
+		}
+		sect == "conn" && want && $1 ~ /^#[0-9]+$/ { c = clk(); if (c > max) max = c; next }
+		sect == "crtc" && $1 ~ /^[0-9]+$/ && $3 ~ /^\(/ { cur = $1; next }
+		sect == "crtc" && $1 == "#0" { crtc[cur] = clk(); next }
+		END {
+			ec = (cenc in enc) ? enc[cenc] : 0
+			print max + 0, (ec in crtc) ? crtc[ec] + 0 : 0
+		}
+	'
+}
+
+# Reads dtn_log and modetest for one connector and applies the rules. Sets
+# STATE, RULE, INPUTS and the values they came from.
+# $1 = card number, $2 = sysfs name, $3 = connector name
 read_link_state() {
 	local dtn=$DEBUGFS/$1/amdgpu_dm_dtn_log
-	local enabled=$DRM_SYSFS/$2/enabled text
+	local enabled=$DRM_SYSFS/$2/enabled text out
 
-	STATE=unknown
-	HPO_ROWS=""
+	STATE=unknown; RULE=""; INPUTS=""
+	DUMP=incomplete; DUMP_WHY=""; HPO_ROWS=""
+	MAX_KHZ=0; ACTIVE_KHZ=0; MODETEST_OK=0
 
 	if [ -r "$enabled" ] && [ "$(cat "$enabled" 2>/dev/null || true)" != enabled ]; then
-		WHY="the connector is not enabled, nothing is driving it"
-		return 0
-	fi
-	if [ ! -e "$dtn" ]; then
-		WHY="$dtn does not exist (debugfs not mounted, or this module has no dtn_log)"
-		return 0
-	fi
-	if ! text=$(cat "$dtn" 2>/dev/null); then
-		WHY="cannot read $dtn (run as root)"
-		return 0
-	fi
-	if [ -z "$text" ]; then
-		WHY="$dtn is empty"
-		return 0
+		DUMP_WHY="the connector is not enabled, nothing is driving it"
+	elif [ ! -e "$dtn" ]; then
+		DUMP_WHY="$dtn does not exist (debugfs not mounted, or this module has no dtn_log)"
+	elif ! text=$(cat "$dtn" 2>/dev/null); then
+		DUMP_WHY="cannot read $dtn (run as root)"
+	elif [ -z "$text" ]; then
+		DUMP_WHY="$dtn is empty"
+	else
+		DUMP=$(printf '%s\n' "$text" | classify_dtn_log)
+		HPO_ROWS=$(printf '%s\n' "$text" | classify_dtn_log rows)
+		[ "$DUMP" != incomplete ] || DUMP_WHY="the dump is cut short or nothing is being driven yet"
 	fi
 
-	STATE=$(printf '%s\n' "$text" | classify_dtn_log)
-	HPO_ROWS=$(printf '%s\n' "$text" | classify_dtn_log rows)
-	case "$STATE" in
-		frl) WHY="an HPO FRL encoder is active" ;;
-		tmds) WHY="no HPO FRL encoder is active" ;;
-		*) WHY="$dtn is incomplete or nothing is being driven yet" ;;
-	esac
+	if command -v modetest >/dev/null 2>&1 && out=$(modetest -M amdgpu -e -c -p 2>/dev/null) && [ -n "$out" ]; then
+		MODETEST_OK=1
+		out=$(printf '%s\n' "$out" | modetest_clocks "$3")
+		MAX_KHZ=${out%% *}
+		ACTIVE_KHZ=${out##* }
+	fi
+
+	INPUTS="dtn_log $DUMP${DUMP_WHY:+ ($DUMP_WHY)}"
+	if [ "$MODETEST_OK" = 1 ]; then
+		INPUTS="$INPUTS, highest mode $MAX_KHZ kHz, active mode $ACTIVE_KHZ kHz"
+	else
+		INPUTS="$INPUTS, modetest unavailable"
+	fi
+
+	if [ "$DUMP" = hpo ]; then
+		STATE=frl; RULE="hpo-row"
+	elif [ "$MAX_KHZ" -gt "$FRL_ONLY_KHZ" ]; then
+		STATE=frl; RULE="mode-list >$FRL_ONLY_KHZ ($MAX_KHZ kHz)"
+	elif [ "$DUMP" = nohpo ] && [ "$ACTIVE_KHZ" -gt "$TMDS_MAX_KHZ" ]; then
+		STATE=tmds; RULE="active $ACTIVE_KHZ kHz without HPO"
+	else
+		RULE="none -> unknown"
+	fi
 }
 
 # Reads the link state until it is frl or $3 seconds have passed. The last
-# reading is the verdict (STATE, WHY, HPO_ROWS).
+# reading is the verdict (STATE, RULE, INPUTS, HPO_ROWS).
 # $1 = card number, $2 = sysfs name, $3 = seconds, $4 = connector name
 poll_link_state() {
 	local waited=0 last=""
 	while :; do
-		read_link_state "$1" "$2"
-		if [ "$STATE/$WHY" != "$last" ]; then
-			log "$4: link state $STATE ($WHY)"
-			last="$STATE/$WHY"
+		read_link_state "$1" "$2" "$4"
+		if [ "$STATE/$RULE/$INPUTS" != "$last" ]; then
+			log "$4: link state $STATE (rule: $RULE; $INPUTS)"
+			last="$STATE/$RULE/$INPUTS"
 		fi
 		if [ "$STATE" = frl ] || [ "$waited" -ge "$3" ]; then
 			return 0
@@ -221,6 +296,8 @@ handle_connector() {
 		else
 			log "$conn: HPO row: none"
 		fi
+		log "$conn: rule: $RULE"
+		log "$conn: inputs: $INPUTS"
 	else
 		poll_link_state "$card" "$sysname" "$FRL_WAIT" "$conn"
 		log_hpo_rows "$conn"
@@ -234,10 +311,10 @@ handle_connector() {
 			fi
 			log "$conn: FRL link is up but --force was given, re-detecting anyway" ;;
 		tmds)
-			log "$conn: link is TMDS" ;;
+			log "$conn: FRL was lost" ;;
 		*)
 			if [ "$FORCE" = 0 ]; then
-				log "$conn: cannot tell which link is running, leaving it alone"
+				log "$conn: cannot tell whether FRL was lost, leaving the link alone"
 				return 0
 			fi
 			log "$conn: link state unknown but --force was given, re-detecting anyway" ;;
@@ -266,9 +343,9 @@ handle_connector() {
 				log_hpo_rows "$conn"
 				return 0 ;;
 			tmds)
-				log "$conn: still TMDS after attempt $i" ;;
+				log "$conn: still no FRL after attempt $i" ;;
 			*)
-				log "$conn: link state unreadable after attempt $i, not trying again"
+				log "$conn: link state no longer clear after attempt $i, not trying again"
 				return 0 ;;
 		esac
 		if [ "$i" -lt "$ATTEMPTS" ]; then sleep 5; fi
