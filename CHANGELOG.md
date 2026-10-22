@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] - 2026-10-23
+
+### Fixed
+
+- `hdmi-frl-resume.sh` no longer judges the link by the highest mode pixel
+  clock. On a TV that tops out at 120 Hz (an LG C9) 4K120 is 1188000 kHz over
+  FRL and over TMDS 4:2:0 alike, so the 1.0.0 check could never see FRL: every
+  resume forced five `trigger_hotplug` cycles, each blanking the screen, and
+  then failed the unit while FRL was running fine. It now reads the `HPO:` table
+  of `amdgpu_dm_dtn_log`, which the driver prints only while an HDMI FRL stream
+  encoder is active, and reports `frl`, `tmds` or `unknown`.
+- After a resume the link is polled for up to 20 s before anything is decided,
+  so a TV that is still waking, or patch 0002 retraining FRL by itself, no
+  longer triggers a re-detect. Only a link that is still `tmds` after that is
+  re-detected, re-checking after each cycle. `unknown` does nothing and exits 0.
+- `--check` prints the link state and the `HPO` row.
+- `setup.sh install` over an existing copy install no longer downloads and
+  builds the module again when `out/` already holds one for the running kernel
+  that was built from the same patches. `build.sh` stamps each module with the
+  hash of its patch set; `HDMI21_REBUILD=1` forces a rebuild.
+
+### Added
+
+- `tests/frl-detect.sh`: fixture dumps for the three link states, the resume
+  script against a fake debugfs tree, and the module reuse rule.
+
+### Removed
+
+- The `TMDS_MAX_KHZ` mode clock discriminator and the `modetest` dependency of
+  the resume script. The `modetest` warning in `setup.sh` now only concerns
+  `status`.
+
 ## [1.0.0] - 2026-10-18
 
 ### Added
