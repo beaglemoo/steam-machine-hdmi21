@@ -39,6 +39,10 @@ SB_VAR=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
 MIRROR_URL=https://steamdeck-packages.steamos.cloud/archlinux-mirror/sources/
 EXEC_FILES="build.sh install.sh uninstall.sh hdmi-mode.sh setup-selfheal.sh setup.sh get.sh
 selfheal/hdmi-frl-selfheal.sh selfheal/hdmi-frl-resume.sh"
+# SHA-256 of patches/*.patch (cat in name order) as shipped in 1.0.0 and 1.0.1.
+# build.sh stamps every module with the hash of the patches it was built from;
+# a module from before the stamp existed (1.0.0) was built from this set.
+LEGACY_PATCHES_SHA=2172983dbd3bae7ba2dc45ba29a25758f9bf9569780286dc547fb324c51a4aff
 
 STEP=0
 KEEPALIVE_PID=""
@@ -148,6 +152,23 @@ start_logging() {
 }
 
 # --- preflight ------------------------------------------------------------
+# True when out/ already holds a module for the running kernel that was built
+# from the patches in this tree, so an upgrade that only touches scripts does
+# not download, compile and reinstall anything again. HDMI21_REBUILD=1 forces
+# a rebuild.
+module_is_current() {
+	local krel zst vm built want
+	[ "${HDMI21_REBUILD:-0}" != 1 ] || return 1
+	krel=$(uname -r)
+	zst=$SELF_DIR/out/amdgpu-$krel.ko.zst
+	[ -f "$zst" ] && [ -f "$zst.vermagic" ] || return 1
+	vm=$(modinfo -F vermagic "$zst" 2>/dev/null | head -1) || return 1
+	[ "${vm%% *}" = "$krel" ] || return 1
+	built=$(cat "$zst.patches" 2>/dev/null || echo "$LEGACY_PATCHES_SHA")
+	want=$(cat "$SELF_DIR"/patches/*.patch | sha256sum | cut -d' ' -f1)
+	[ "$built" = "$want" ]
+}
+
 # 1-3: run before anything is changed; uninstall needs only these.
 preflight_basic() {
 	local pw
@@ -166,8 +187,9 @@ preflight_basic() {
 
 # 4-10: install only, run once the scripts are in their final place.
 preflight_install() {
-	local krel have_deps=1 have_cache=0 avail need=12 net_ok=1
+	local krel have_deps=1 have_cache=0 avail need=12 net_ok=1 reuse=0
 	krel=$(uname -r)
+	if module_is_current; then reuse=1; need=0; fi
 
 	bash "$SELF_DIR/build.sh" --check-kernel || refuse "this kernel is not supported (see above)"
 
@@ -182,7 +204,7 @@ preflight_install() {
 
 	if compgen -G "$CACHE_DIR/extract/*/.bare-repo" >/dev/null; then
 		have_cache=1
-		need=4
+		if [ "$reuse" = 0 ]; then need=4; fi
 	fi
 	avail=$(df -Pk /home | awk 'NR==2 {print $4}')
 	if [ "${avail:-0}" -lt $(( need * 1024 * 1024 )) ]; then
@@ -193,7 +215,9 @@ preflight_install() {
 		&& command -v make >/dev/null 2>&1 || have_deps=0
 	curl -fsS --max-time 15 -o /dev/null "$MIRROR_URL" || net_ok=0
 	if [ "$net_ok" = 0 ]; then
-		if [ "$have_deps" = 1 ] && [ "$have_cache" = 1 ]; then
+		if [ "$reuse" = 1 ]; then
+			warn "cannot reach $MIRROR_URL; the module already built for $krel is reused"
+		elif [ "$have_deps" = 1 ] && [ "$have_cache" = 1 ]; then
 			warn "cannot reach $MIRROR_URL, carrying on with the cached toolchain and source"
 		else
 			refuse "cannot reach $MIRROR_URL and the headers, gcc, make and cached source are not all present"
@@ -384,7 +408,12 @@ do_install() {
 	start_keepalive
 
 	STEP=1; log "step 1/5: build the patched amdgpu module"
-	run bash "$SELF_DIR/build.sh"
+	if module_is_current; then
+		log "out/ already holds a module for $(uname -r) built from these patches, not rebuilding"
+		log "(HDMI21_REBUILD=1 forces a rebuild)"
+	else
+		run bash "$SELF_DIR/build.sh"
+	fi
 
 	STEP=2; log "step 2/5: install the module"
 	if [ "$DRY" = 1 ]; then dry_forward install.sh; else sudo bash "$SELF_DIR/install.sh"; fi

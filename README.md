@@ -95,6 +95,15 @@ itself; that needs one extra reboot to load.
 After the reboot pick 3840x2160 at 144 Hz and turn on HDR in Steam Settings >
 Display.
 
+## Upgrading
+
+Run the one-line install again. It replaces the scripts in
+`~/steam-machine-hdmi21` and keeps `out/` and `work/`; when `out/` already holds a
+module for the running kernel that was built from the same patches (1.0.1 changes
+none), it does not download or build anything again and reinstalls that module.
+`--no-reboot` skips the reboot prompt, which is not needed for a scripts-only
+upgrade. `HDMI21_REBUILD=1` forces a rebuild.
+
 ## Verify
 
 ```
@@ -363,13 +372,41 @@ Check on it with `systemctl status hdmi-frl-grub.service` and
 
 ## After resume
 
-An s2idle suspend/resume comes back with the FRL modes gone. The connector's
-mode list loses everything above the TMDS pixel clock ceiling -- 3840x2160 at
-143.99 Hz is 1332750 kHz and disappears -- even though the EDID read back from
-the TV is byte-identical. The highest mode that remains is 4K120 4:2:0 at
-1188000 kHz over TMDS, which is why the script treats anything above 1,200,000
-kHz as proof that the FRL link is up. What was lost is the FRL link capability,
-not the EDID.
+An s2idle suspend/resume can come back with the FRL link gone. On a TV that
+tops out at 144 Hz the connector's mode list shows it: everything above the TMDS
+pixel clock ceiling disappears (3840x2160 at 143.99 Hz is 1332750 kHz), even
+though the EDID read back from the TV is byte-identical. What was lost is the FRL
+link capability, not the EDID.
+
+Neither the mode list nor the driver's link state is a reliable witness on its
+own. A 120 Hz TV such as the LG C9 lists 4K120 at 1188000 kHz over FRL and over
+TMDS 4:2:0 alike, so its mode list cannot tell the two links apart. And an
+FRL-capable TV that runs a mode which fits TMDS on purpose (4K60, 1080p) has no
+FRL encoder either, so "no FRL encoder" does not mean the link was lost. The
+resume script therefore classifies the link from three inputs, and the first
+match wins:
+
+1. **hpo-row**: `/sys/kernel/debug/dri/0/amdgpu_dm_dtn_log` is amdgpu's hardware
+   state dump, and its `HPO:` table lists the active HDMI FRL stream encoders.
+   The driver only prints that table while one is enabled, so a row in it means
+   the link is FRL right now. The `Link` column of the row is ignored: a healthy
+   FRL link has been seen reading `Training`. Result: `frl`.
+2. **mode-list**: the connector (`modetest -M amdgpu -c`) lists a mode above
+   1,200,000 kHz. TMDS tops out at 600 MHz and 4:2:0 halves that, so only an FRL
+   capable link can offer one (4K144 is 1332750 kHz); the capability is intact.
+   Result: `frl`. This is the rule 1.0.0 used on its own.
+3. **active mode**: the dump is complete, shows an OTG row and no HPO row, and the
+   CRTC driving the connector (found through its encoder in `modetest -e -c -p`)
+   runs a mode above 600,000 kHz. Above 600 MHz TMDS can only carry a mode as
+   4:2:0 and FRL always uses the HPO encoder, so a 4K120 stream with no HPO
+   encoder is the lost-FRL fallback. Result: `tmds`, meaning FRL was lost and
+   recovery is warranted.
+
+Everything else is `unknown` and is never acted on: a 120 Hz TV running 4K60 or
+lower, a dump that is cut short, a file that cannot be read, a connector that is
+not enabled, a missing `modetest`. That is deliberate. A lost link on a 120 Hz TV
+can only be detected while it is driving a mode above 600 MHz, and a missed
+recovery costs less than blanking the screen on a guess.
 
 `selfheal/hdmi-frl-resume.sh` was written to force a re-detect through the
 debugfs file `/sys/kernel/debug/dri/0/HDMI-A-1/trigger_hotplug`: writing `1`
@@ -383,52 +420,68 @@ lost FRL modes after a resume are that same bug, not a separate one.
 Patch 0002 is the fix, and the installer always includes it: with it the
 driver verifies the link capability
 destructively on every hotplug, including the one after a resume, and the FRL
-modes come back on their own.
+link comes back on its own.
 
-The resume unit stays installed as a belt-and-braces check. It only acts when
-the FRL modes are missing, so with patch 0002 loaded it should normally log
-`FRL modes present, nothing to do` and exit. When it does act, it waits up to
-60 s for the connector to read connected (the TV may still be waking), skips out
-if the sink EDID advertises no `Max Fixed Rate Link`, reads the mode list with
-`modetest -M amdgpu -c`, runs up to five `0`, `1` cycles re-checking after each,
-and on success emits a synthetic `change` uevent with `udevadm trigger`, because
-neither debugfs write emits one and the compositor would not otherwise re-read
-the connector. It does nothing at all unless bit `0x400` of
+The resume unit stays installed as a belt-and-braces check, and with patch 0002
+loaded it should normally log `FRL link is up, nothing to do` and exit. It waits
+up to 60 s for the connector to read connected (the TV may still be waking), then
+polls the link state for up to 20 s more, because patch 0002 retrains FRL on the
+resume hotplug by itself. If the link comes up in that time it only logs and
+exits, and never touches `trigger_hotplug`. Only a link that is still `tmds` (rule 3) after
+the wait is re-detected, and only if the sink EDID advertises `Max Fixed Rate
+Link`: up to five `0`, `1` cycles. After each cycle it emits a synthetic `change`
+uevent with `udevadm trigger` first, because neither debugfs write emits one and
+the compositor needs it to re-read the connector and switch to an FRL stream, and
+only then reads the link state again with the same rules; `frl` by rule 1 or 2
+counts as success. An unknown state does nothing and exits 0, so the screen is
+never blanked on a guess. The unit does nothing at all unless bit `0x400` of
 `amdgpu.dcfeaturemask` is on the running cmdline.
+
+Version 1.0.0 judged the link from the mode list alone, treating a highest mode
+clock above 1,200,000 kHz as proof of FRL and anything else as lost. On a 120 Hz
+TV that never held, so every resume forced five `0`, `1` cycles, each blanking
+the screen, and then failed the unit while FRL was running fine. That is fixed in
+1.0.1.
 
 `setup-selfheal.sh` installs it as `hdmi-frl-resume.service`, a oneshot ordered
 `After=` and `WantedBy=` the four sleep targets.
 
-To see what it makes of the current link without writing anything:
+To see what it makes of the current link without writing anything (it prints
+the link state, the rule that decided it, its inputs and the `HPO` row or `HPO
+row: none`; reading the dump needs root):
 
 ```
 sudo selfheal/hdmi-frl-resume.sh --check
 journalctl -u hdmi-frl-resume.service -b
 ```
 
-`--force` runs one cycle even when the FRL modes are present, which is how the
-cycle itself was verified.
+`--force` runs one cycle even when the FRL link is up or the state is unknown,
+which is how the cycle itself was verified.
 
-Sleep and wake with patch 0002 has not been tested as thoroughly as TV standby
-and input switches. One report (an LG C9) has the screen blanking several times
-after a resume before FRL settles. The cause is not known yet; one suspect is
-the resume unit firing while the TV is still waking. To rule it out, turn the
-unit off and try a few sleep/wake cycles:
+An LG C9 report had the screen blanking several times after every resume. The
+cause was the 1.0.0 mode clock check described above, not the TV waking: it
+could not see FRL on a 120 Hz TV and forced the blanking cycles. Upgrade to 1.0.1
+(see "Upgrading"). If the screen still blanks after a resume, please add the
+output of `journalctl -b -u hdmi-frl-resume.service` and `sudo
+selfheal/hdmi-frl-resume.sh --check` to the issue tracker. To rule the unit out
+while testing, turn it off and try a few sleep/wake cycles:
 
 ```
 sudo systemctl disable hdmi-frl-resume.service    # turn it back on with enable
 ```
-
-If you see this, please add the output of `journalctl -b -u
-hdmi-frl-resume.service` to the issue tracker.
 
 ## Known limitations
 
 - The module is built out of tree and is unsigned. It taints the kernel with
   `O` and `E`. Secure Boot is off on SteamOS and `CONFIG_MODULE_SIG_FORCE` is
   not set, so it loads normally.
-- Sleep/wake: the screen can blank several times after a resume before FRL
-  settles (seen on an LG C9). See "After resume".
+- Sleep/wake: 1.0.0 blanked the screen five times on every resume on 120 Hz
+  TVs (seen on an LG C9) because it read the mode list instead of the link
+  state; fixed in 1.0.1. See "After resume". The link state comes from a debugfs
+  file, so the resume check needs root and cannot tell which of several outputs
+  carries the FRL link; the Steam Machine has one HDMI port. On a 120 Hz TV a
+  lost FRL link is only detected while it drives a mode above 600 MHz (4K120);
+  at 4K60 or lower the check reports unknown and does nothing.
 - A SteamOS update that changes the kernel means a rebuild. That is automatic
   with the self-heal installed, but it needs a working network connection and a
   second reboot.

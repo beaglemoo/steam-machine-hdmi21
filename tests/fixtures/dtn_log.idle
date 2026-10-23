@@ -1,0 +1,35 @@
+[dtn begin]
+HUBBUB WM:      data_urgent  pte_meta_urgent         sr_enter          sr_exit    dram_clk_change
+WM_Set[0]:                0                0                0                0                  0
+
+HUBP:  format  addr_hi  width  height  rot  mir  sw_mode  dcc_en  blank_en  clock_en  ttu_dis  underflow   min_ttu_vblank       qos_low_wm      qos_high_wm
+[0]:       8h       2h   3840    2160   0h   0h     11h       1         0         1        0          0            0                0                0
+
+DPP:    IGAM format    IGAM mode    DGAM mode    RGAM mode    GAMUT mode  C11 C12   C13 C14   C21 C22   C23 C24   C31 C32   C33 C34
+[0]:       0h          Bypass       Bypass       Bypass       Bypass     00000000  00000000  00000000  00000000  00000000  00000000
+
+MPCC:  OPP  DPP  MPCCBOT  MODE  ALPHA_MODE  PREMULT  OVERLAP_ONLY  IDLE
+[0]:    0h   0h      0h    3h          1        0            0       0
+
+OTG:  v_bs  v_be  v_ss  v_se  vpol  vmax  vmin  vmax_sel  vmin_sel  h_bs  h_be  h_ss  h_se  hpol  htot  vtot  underflow blank_en
+
+DSC: CLOCK_EN  SLICE_WIDTH  Bytes_pp
+[0]: 0         0            0
+[1]: 0         0            0
+
+S_ENC: DSC_MODE  SEC_GSP7_LINE_NUM  VBID6_LINE_REFERENCE  VBID6_LINE_NUM  SEC_GSP7_ENABLE  SEC_STREAM_ENABLE
+[0  ]: 0         0                  0                     0               0                0
+
+L_ENC: DPHY_FEC_EN  DPHY_FEC_READY_SHADOW  DPHY_FEC_ACTIVE_STATUS  DP_LINK_TRAINING_COMPLETE
+[0  ]: 0            0                      0                       0
+
+CALCULATED Clocks: dcfclk_khz:600000  dcfclk_deep_sleep_khz:300000  dispclk_khz:600000
+dppclk_khz:600000  max_supported_dppclk_khz:600000  fclk_khz:1600000  socclk_khz:600000
+
+DP HPO S_ENC:  Enabled  OTG   Format   Depth   Vid   SDP   Compressed  Link
+[0]:                 0    0    4:4:4       6       0     0            0     0
+[1]:                 0    0    4:4:4       6       0     0            0     0
+
+DP HPO L_ENC:  Enabled  Mode   Lanes   Stream  Slots   VC Rate X    VC Rate Y
+[0]:                 0   N/A       0        0       0            0            0
+[dtn end]
