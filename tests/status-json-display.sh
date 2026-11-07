@@ -24,7 +24,12 @@ cat > "$T/bin/systemctl" <<'STUB'
 #!/bin/sh
 printf 'LoadState=not-found\nUnitFileState=\nActiveState=inactive\nSubState=dead\nResult=success\n'
 STUB
-chmod +x "$T/bin/modetest" "$T/bin/systemctl"
+# edid-decode stub: says the sink has FRL when the bytes on stdin hold FRL_SINK
+cat > "$T/bin/edid-decode" <<'STUB'
+#!/bin/sh
+if grep -q FRL_SINK; then echo "Max Fixed Rate Link: 48 Gbps"; else echo "EDID decoded"; fi
+STUB
+chmod +x "$T/bin/modetest" "$T/bin/systemctl" "$T/bin/edid-decode"
 
 fail=0
 pass=0
@@ -292,6 +297,38 @@ STUB_COUNT=$T/count STUB_MODETEST=$FX/modetest.frl-hdr HDMI_FRL_TEST_SYSFS=$T/tr
 	HDMI_FRL_TEST_MODPARAM=$T/empty HDMI_FRL_TEST_GRUBD=$T/empty PATH="$T/bin:$PATH" \
 	bash "$SETUP" status --json --dir "$T" > "$T/out.json" 2> "$T/err" || true
 expect "empty amdgpu_current_hdmi: nulls" '[null, null, null, null, false, []]' "$(allm)"
+
+# status_tree tree-dir modetest-fixture : status --json on an existing fake tree
+status_tree() {
+	RC=0
+	STUB_COUNT=$T/count STUB_MODETEST=$2 HDMI_FRL_TEST_SYSFS=$1/sys HDMI_FRL_TEST_DEBUGFS=$1/dri \
+		HDMI_FRL_TEST_MODPARAM=$T/empty HDMI_FRL_TEST_GRUBD=$T/empty PATH="$T/bin:$PATH" \
+		bash "$SETUP" status --json --dir "$T" > "$T/out.json" 2> "$T/err" || RC=$?
+}
+sink() { field 'd["display"]["sink_frl"]'; }
+
+# sink_frl: sysfs reports a size of 0 for edid whatever it returns. A FIFO has
+# the same property (readable, size 0, one read), so a -s test would skip it.
+d=$T/edid; rm -rf "$d"; mk_tree "$d" frl-hdr; cp "$FX/dtn_log.frl-hdr" "$d/dri/0/amdgpu_dm_dtn_log"
+mkfifo "$d/sys/card0-HDMI-A-1/edid"
+expect "edid fixture: a size test would see nothing" no "$([ -s "$d/sys/card0-HDMI-A-1/edid" ] && echo yes || echo no)"
+cat "$FX/edid/frl-sink" > "$d/sys/card0-HDMI-A-1/edid" & wpid=$!
+status_tree "$d" "$FX/modetest.frl-hdr"
+kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+expect "edid with Max Fixed Rate Link, size reported 0: sink_frl true" True "$(sink)"
+rm -f "$d/sys/card0-HDMI-A-1/edid"; mkfifo "$d/sys/card0-HDMI-A-1/edid"
+cat "$FX/edid/no-frl" > "$d/sys/card0-HDMI-A-1/edid" & wpid=$!
+status_tree "$d" "$FX/modetest.frl-hdr"
+kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+expect "edid without it: sink_frl false" False "$(sink)"
+rm -f "$d/sys/card0-HDMI-A-1/edid"; : > "$d/sys/card0-HDMI-A-1/edid"
+status_tree "$d" "$FX/modetest.frl-hdr"
+expect "edid that reads empty: sink_frl null" None "$(sink)"
+rm -f "$d/sys/card0-HDMI-A-1/edid"
+status_tree "$d" "$FX/modetest.frl-hdr"
+expect "no edid file: sink_frl null" None "$(sink)"
+# shellcheck disable=SC2016 # looking for the literal text
+expect "no -s test left on the edid path in setup.sh" 0 "$(grep -c -- '-s "\$JSON_SYSFS' "$SETUP" || true)"
 
 # modetest fails: hdr, content type and allm are null.
 run_status none dtn_log.frl-hdr frl-hdr

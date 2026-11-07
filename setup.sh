@@ -892,7 +892,7 @@ do_status_json() {
 	local s_model="" s_chroma="" s_chroma_src="" s_bpc="" s_bpc_src="" s_colorimetry=""
 	local hdr_active="" hdr_eotf="" content_type="" allm_mode=""
 	local content_type_sent="" a_active="" a_default="" a_conf="" a_txt
-	local cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
+	local edid_tmp cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
 	local tools_modetest=0 tools_edid=0 jreadable=0
 	local u_grub u_resume u_rebuild a_grub a_rebuild
 	local src rb_state=idle rb_h="" rb_l="" grubj jout
@@ -1048,13 +1048,22 @@ do_status_json() {
 	fi
 	if [ "$d_connected" = 1 ]; then derive_display; fi
 	if [ "$d_connected" = 1 ]; then
-		if [ "$tools_edid" = 1 ] && [ -s "$JSON_SYSFS/$d_sys/edid" ]; then
-			ed=$(t5 edid-decode < "$JSON_SYSFS/$d_sys/edid" 2>/dev/null || true)
-			case "$ed" in
-				'') ;;
-				*"Max Fixed Rate Link"*) d_sink=1 ;;
-				*) d_sink=0 ;;
-			esac
+		if [ "$tools_edid" = 1 ] && [ -r "$JSON_SYSFS/$d_sys/edid" ]; then
+			# sysfs reports a size of 0 for edid whatever it returns, so a size
+			# test would always skip it: read it once and judge what came back
+			edid_tmp=$(mktemp 2>/dev/null) || edid_tmp=""
+			if [ -n "$edid_tmp" ]; then
+				t5 cat "$JSON_SYSFS/$d_sys/edid" > "$edid_tmp" 2>/dev/null || true
+				if [ -s "$edid_tmp" ]; then
+					ed=$(t5 edid-decode < "$edid_tmp" 2>/dev/null || true)
+					case "$ed" in
+						'') ;;
+						*"Max Fixed Rate Link"*) d_sink=1 ;;
+						*) d_sink=0 ;;
+					esac
+				fi
+				rm -f "$edid_tmp"
+			fi
 		fi
 	fi
 	if [ -n "$d_sys" ]; then
