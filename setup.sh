@@ -564,6 +564,8 @@ add_warn() { JSON_WARN="${JSON_WARN:+$JSON_WARN,}$(json_str "$1")"; }
 # process: it defines log/die/usage and its own thresholds, which must not
 # replace setup.sh's. The script is passed as $1 because while $0 equals the
 # sourced file it would run its main instead of just defining functions.
+# modetest -e -c -p output, already captured by the caller, comes in on stdin
+# and stands in for modetest inside the child, so the display is queried once.
 # Prints key=value lines; fails when the script is missing or the child fails.
 # $1 = card number, $2 = sysfs name, $3 = connector name
 link_probe() {
@@ -571,6 +573,8 @@ link_probe() {
 	[ -r "$script" ] || return 1
 	# shellcheck disable=SC2016 # the child expands these, not this shell
 	t5 bash -c '
+		mt=$(cat)
+		modetest() { [ -n "$mt" ] && printf "%s\n" "$mt"; }
 		. "$1" || exit 1
 		read_link_state "$2" "$3" "$4"
 		printf "state=%s\nrule=%s\ndump=%s\nmax_khz=%s\nactive_khz=%s\nfrl_only_khz=%s\n" \
@@ -579,6 +583,183 @@ link_probe() {
 			"$(printf "%s\n" "$HPO_ROWS" | sed -n 1p)" \
 			"$(printf "%s" "$HPO_ROWS" | awk "END { print NR }")"
 	' _ "$script" "$1" "$2" "$3"
+}
+
+# Reads modetest -e -c -p on stdin and prints "name<TAB>value" for every
+# property of connector $1. Enums are resolved to their names, ranges stay
+# numbers and blobs are their bytes as one hex string (empty for an empty blob).
+# An enum list reads "Disabled=0 Dynamic=1 Always On=2": split on "=", the first
+# piece is the first name and every later piece is "N next-name".
+modetest_connector_props() { # connector
+	awk -v conn="$1" '
+		function flush(   v, n, t, i, sp, num, nm, nx) {
+			if (name == "") return
+			v = val
+			if (kind == "blob") v = blob
+			else if (kind == "enum") {
+				n = split(enums, t, "=")
+				nm = t[1]
+				for (i = 2; i <= n; i++) {
+					if (i < n) { sp = index(t[i], " "); num = substr(t[i], 1, sp - 1); nx = substr(t[i], sp + 1) }
+					else { num = t[i]; nx = "" }
+					if (num == val) { v = nm; break }
+					nm = nx
+				}
+			}
+			print name "\t" v
+			name = ""
+		}
+		/^Connectors:/ { sect = "conn"; next }
+		/^(Encoders|CRTCs|Planes|Frame buffers):/ { flush(); sect = ""; want = 0; next }
+		sect != "conn" { next }
+		/^[0-9]/ && ($3 == "connected" || $3 == "disconnected" || $3 == "unknown") {
+			flush(); want = ($4 == conn); inprops = 0; next
+		}
+		!want { next }
+		/^[ \t]*props:/ { inprops = 1; next }
+		!inprops { next }
+		/^\t[0-9]+ / {
+			flush()
+			name = $0; sub(/^\t[0-9]+ /, "", name); sub(/:[ \t]*$/, "", name)
+			kind = ""; val = ""; enums = ""; blob = ""; inblob = 0
+			next
+		}
+		/^\t\tflags:/ { kind = ($0 ~ /blob/) ? "blob" : (($0 ~ /enum/) ? "enum" : "num"); next }
+		/^\t\tenums:/ { enums = $0; sub(/^\t\tenums:[ \t]*/, "", enums); next }
+		/^\t\tvalue:/ { val = $0; sub(/^\t\tvalue:[ \t]*/, "", val); sub(/[ \t\r]+$/, "", val); inblob = 1; next }
+		inblob && /^\t\t\t[0-9a-fA-F]+[ \t\r]*$/ { b = $0; gsub(/[ \t\r]/, "", b); blob = blob b; next }
+		END { flush() }
+	'
+}
+
+# Reads modetest -e -c -p on stdin and prints the index of the CRTC that
+# connector $1 is driven by: its encoder's CRTC, as a position in the CRTCs:
+# list. That is the N of the debugfs crtc-N directory. Prints nothing when the
+# connector has no encoder or the CRTC is not listed.
+modetest_crtc_index() { # connector
+	awk -v conn="$1" '
+		/^Encoders:/ { sect = "enc"; next }
+		/^Connectors:/ { sect = "conn"; next }
+		/^CRTCs:/ { sect = "crtc"; next }
+		/^Planes:/ { sect = "plane"; next }
+		sect == "enc" && $1 ~ /^[0-9]+$/ && NF >= 3 { enc[$1] = $2; next }
+		sect == "conn" && $1 ~ /^[0-9]+$/ && ($3 == "connected" || $3 == "disconnected" || $3 == "unknown") {
+			if ($4 == conn) cenc = $2
+			next
+		}
+		sect == "crtc" && $1 ~ /^[0-9]+$/ && $3 ~ /^\(/ { idx[$1] = n++; next }
+		END { if ((cenc in enc) && (enc[cenc] in idx)) print idx[enc[cenc]] }
+	'
+}
+
+# Splits one HPO table (the header line and one row of amdgpu_dm_dtn_log, as
+# classify_dtn_log header|rows prints them) by column name and prints
+# "pixel_format=..." and "depth=...". The columns are found by name, never by
+# position: the header is cut on runs of two or more spaces (names such as
+# "Pixel Format" hold one), the row on whitespace. Fails when the two do not
+# have the same number of cells.
+hpo_fields() { # header row
+	awk -v h="$1" -v r="$2" 'BEGIN {
+		sub(/^HPO:[ \t]*/, "", h); sub(/[ \t\r]+$/, "", h)
+		sub(/^\[[ 0-9]+\]:[ \t]*/, "", r); sub(/[ \t\r]+$/, "", r)
+		n = split(h, hn, /  +/); m = split(r, rv, /[ \t]+/)
+		if (n == 0 || n != m) exit 1
+		for (i = 1; i <= n; i++) {
+			if (hn[i] == "Pixel Format") print "pixel_format=" rv[i]
+			else if (hn[i] == "Depth") print "depth=" rv[i]
+		}
+	}'
+}
+
+# Works out the signal fields of the connected display. Called from
+# do_status_json and writes its locals (bash scoping): s_model, s_chroma,
+# s_chroma_src, s_bpc, s_bpc_src, s_colorimetry, hdr_active, hdr_eotf,
+# content_type and the allm_* values.
+derive_display() {
+	local hf hp_fmt="" hp_depth="" bf cf txt crtc_bpc="" crtc_cs="" byte
+
+	if [ -n "$l_hpo_row" ] && [ -n "$l_hpo_header" ]; then
+		if [[ $l_hpo_rows =~ ^[0-9]+$ ]] && [ "$l_hpo_rows" -gt 1 ]; then
+			add_warn "the HPO table has $l_hpo_rows rows: using the first"
+		fi
+		hf=$(hpo_fields "$l_hpo_header" "$l_hpo_row" 2>/dev/null) || hf=""
+		hp_fmt=$({ printf '%s\n' "$hf" | sed -n 's/^pixel_format=//p'; } || true)
+		hp_depth=$({ printf '%s\n' "$hf" | sed -n 's/^depth=//p'; } || true)
+		case "$hp_fmt" in 4:4:4|4:2:2|4:2:0) ;; *) hp_fmt="" ;; esac
+		[[ $hp_depth =~ ^[0-9]+$ ]] || hp_depth=""
+		if [ -z "$hp_fmt" ] || [ -z "$hp_depth" ]; then
+			add_warn "the HPO row could not be read by column name"
+		fi
+	fi
+
+	if [ -n "$d_crtc" ]; then
+		bf=$JSON_DEBUGFS/$d_card/crtc-$d_crtc/amdgpu_current_bpc
+		cf=$JSON_DEBUGFS/$d_card/crtc-$d_crtc/amdgpu_current_colorspace
+		# an idle CRTC fails with ENODEV, which reads as nothing
+		if [ -r "$bf" ]; then
+			txt=$(cat "$bf" 2>/dev/null || true)
+			if [[ $txt =~ ^Current:[[:space:]]*([0-9]+) ]]; then crtc_bpc=${BASH_REMATCH[1]}; fi
+		fi
+		if [ -r "$cf" ]; then
+			txt=$(cat "$cf" 2>/dev/null || true)
+			crtc_cs=$(printf '%s' "$txt" | LC_ALL=C tr -cd 'A-Za-z0-9_')
+		fi
+		if [ "$as_root" = 0 ] && [ ! -r "$bf" ] && [ ! -r "$cf" ]; then
+			add_warn "not root: pixel format, bit depth and colorimetry (debugfs) cannot be read"
+		fi
+	fi
+
+	# bit depth: the HPO table is the encoder's own word, the CRTC the fallback
+	if [ -n "$hp_depth" ]; then
+		s_bpc=$hp_depth; s_bpc_src=hpo
+		if [ -n "$crtc_bpc" ] && [ "$crtc_bpc" != "$hp_depth" ]; then
+			add_warn "bit depth: the HPO table says $hp_depth but the CRTC says $crtc_bpc; using the HPO table"
+		fi
+	elif [ -n "$crtc_bpc" ]; then
+		s_bpc=$crtc_bpc; s_bpc_src=crtc
+	fi
+
+	# colour model: the driver picks the colorspace by encoding only for Default
+	# and BT2020, so a BT601/BT709 YCC reading counts only while the connector
+	# Colorspace property is Default
+	case "$crtc_cs" in
+		sRGB|BT2020_RGB) s_model=rgb ;;
+		BT2020_YCC) s_model=ycbcr ;;
+		BT601_YCC|BT709_YCC) if [ "$p_cs" = Default ]; then s_model=ycbcr; fi ;;
+	esac
+	[ -z "$crtc_cs" ] || s_colorimetry=$crtc_cs
+
+	# chroma: the HPO table, else what the link or the colour model implies
+	if [ -n "$hp_fmt" ]; then
+		s_chroma=$hp_fmt; s_chroma_src=hpo
+	elif [ "$l_state" = tmds ]; then
+		s_chroma=4:2:0; s_chroma_src=tmds-clock
+	elif [ "$s_model" = rgb ]; then
+		s_chroma=4:4:4; s_chroma_src=rgb
+	fi
+	if [ "$s_model" = rgb ] && { [ "$s_chroma" = 4:2:0 ] || [ "$s_chroma" = 4:2:2 ]; }; then
+		s_model=""
+		add_warn "colour model: the colorspace reads RGB but the link carries $s_chroma; colour model left unknown"
+	fi
+
+	# HDR: byte 4 of HDR_OUTPUT_METADATA is the EOTF (after the 4-byte type)
+	if [ "$p_hdr" = - ]; then
+		:
+	elif [ -z "$p_hdr" ]; then
+		hdr_active=0
+	elif [[ $p_hdr =~ ^[0-9a-fA-F]{10,}$ ]]; then
+		byte=$((16#${p_hdr:8:2}))
+		if [ "$byte" -ge 1 ]; then hdr_active=1; else hdr_active=0; fi
+		case "$byte" in 0) hdr_eotf=sdr ;; 1) hdr_eotf=hdr_gamma ;; 2) hdr_eotf=pq ;; 3) hdr_eotf=hlg ;; esac
+	fi
+
+	case "$p_ct" in
+		"No Data") content_type=no_data ;;
+		Graphics) content_type=graphics ;;
+		Photo) content_type=photo ;;
+		Cinema) content_type=cinema ;;
+		Game) content_type=game ;;
+	esac
 }
 
 unit_env() { # VAR: value from the installed hdmi-frl-grub.service
@@ -648,7 +829,11 @@ do_status_json() {
 	local m_srcmatch="" m_state=stock fn ls fs btime mt ed
 	local p d_sys="" d_conn="" d_card="" d_connected=0 d_clock="" d_vrr="" d_frl="" d_sink=""
 	local probe line l_state="" l_rule="" l_dump="" l_max="" l_active="" l_frl_only=""
-	local mtout res cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
+	local l_hpo_header="" l_hpo_row="" l_hpo_rows="" mt props pk pv d_crtc=""
+	local p_cs="" p_ct="" p_hdr=- p_allm_cap="" p_allm_mode=""
+	local s_model="" s_chroma="" s_chroma_src="" s_bpc="" s_bpc_src="" s_colorimetry=""
+	local hdr_active="" hdr_eotf="" content_type="" allm_mode=""
+	local cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
 	local tools_modetest=0 tools_edid=0 jreadable=0
 	local u_grub u_resume u_rebuild a_grub a_rebuild
 	local src rb_state=idle rb_h="" rb_l="" grubj jout
@@ -733,48 +918,18 @@ do_status_json() {
 		d_card=${d_card#card}
 		[ "$(cat "$JSON_SYSFS/$d_sys/status" 2>/dev/null || true)" = connected ] && d_connected=1
 	fi
+	# one modetest run feeds the link probe, the connector properties, the CRTC
+	# index and the current mode
 	if [ "$tools_modetest" = 1 ] && [ -n "$d_conn" ]; then
-		# modetest -c: one line per mode, the pixel clock is the 12th field (as in
-		# hdmi-frl-resume.sh); vrr_capable is a property of the same connector.
-		mtout=$(t5 modetest -M amdgpu -c 2>/dev/null || true)
-		res=$(printf '%s\n' "$mtout" | awk -v conn="$d_conn" '
-			$1 ~ /^[0-9]+$/ && NF >= 4 && ($3 == "connected" || $3 == "disconnected") {
-				want = ($4 == conn); invrr = 0
-				if (want) found = 1
-				next
-			}
-			want && $1 ~ /^#[0-9]+$/ && $12 + 0 > max { max = $12 + 0 }
-			want && /vrr_capable/ { invrr = 1; next }
-			want && invrr && $1 == "value:" { vrr = $2; invrr = 0 }
-			END { if (found) { print "clock " max + 0; print "vrr " (vrr == "" ? "-" : vrr) } }
-		')
-		d_clock=$(printf '%s\n' "$res" | sed -n 's/^clock //p')
-		d_vrr=$(printf '%s\n' "$res" | sed -n 's/^vrr //p')
-		case "$d_vrr" in 0|1) ;; *) d_vrr="" ;; esac
-		if [ "$d_connected" = 1 ]; then
-			# same CRTC/mode pairing as hdmi-mode.sh status: the mode line after
-			# the CRTC at (0,0); a CRTC without a mode (0x0) is skipped
-			cm=$(t5 modetest -M amdgpu -p 2>/dev/null | awk '
-				/^[0-9]+[ \t]+[0-9]+[ \t]+\(0,0\)/ { grab = 1; next }
-				grab && $1 ~ /^#[0-9]+$/ {
-					split($2, a, "x")
-					if (a[1] + 0 > 0) { print $2, $3; exit }
-				}
-				grab { grab = 0 }
-			') || true
-			read -r cm_name cm_hz <<EOF
-$cm
-EOF
-			if [[ $cm_name =~ ^([0-9]+)x([0-9]+) ]]; then
-				d_mode="{\"width\":${BASH_REMATCH[1]},\"height\":${BASH_REMATCH[2]},\"refresh_hz\":$(json_num_or_null "$cm_hz"),\"name\":$(json_str "$cm_name")}"
-			fi
-		fi
+		mt=$(t5 modetest -M amdgpu -e -c -p 2>/dev/null || true)
+	else
+		mt=""
 	fi
 	if [ "$tools_modetest" = 0 ]; then
-		add_warn "modetest is missing: display and VRR capability fields are unavailable"
+		add_warn "modetest is missing: display, VRR and ALLM fields are unavailable"
 	fi
 	if [ -n "$d_sys" ]; then
-		if probe=$(link_probe "$d_card" "$d_sys" "$d_conn" 2>/dev/null); then
+		if probe=$(link_probe "$d_card" "$d_sys" "$d_conn" 2>/dev/null <<< "$mt"); then
 			while IFS= read -r line; do
 				case ${line%%=*} in
 					state) l_state=${line#*=} ;;
@@ -783,18 +938,56 @@ EOF
 					max_khz) l_max=${line#*=} ;;
 					active_khz) l_active=${line#*=} ;;
 					frl_only_khz) l_frl_only=${line#*=} ;;
+					hpo_header) l_hpo_header=${line#*=} ;;
+					hpo_row) l_hpo_row=${line#*=} ;;
+					hpo_rows) l_hpo_rows=${line#*=} ;;
 				esac
 			done <<< "$probe"
 			case "$l_state" in frl|tmds|unknown) ;; *) l_state="" ;; esac
 			[ "$l_active" != 0 ] || l_active=""
 			# modetest unavailable or failed reads as a highest mode of 0
-			if [ "$d_connected" = 1 ] && [[ $l_max =~ ^[1-9][0-9]*$ ]] && [[ $l_frl_only =~ ^[0-9]+$ ]]; then
-				if [ "$l_max" -gt "$l_frl_only" ]; then d_frl=1; else d_frl=0; fi
+			if [[ $l_max =~ ^[1-9][0-9]*$ ]]; then
+				d_clock=$l_max
+				if [ "$d_connected" = 1 ] && [[ $l_frl_only =~ ^[0-9]+$ ]]; then
+					if [ "$l_max" -gt "$l_frl_only" ]; then d_frl=1; else d_frl=0; fi
+				fi
 			fi
 		else
 			add_warn "the link state could not be classified: selfheal/hdmi-frl-resume.sh is missing or its probe failed"
 		fi
 	fi
+	if [ -n "$mt" ]; then
+		props=$(printf '%s\n' "$mt" | modetest_connector_props "$d_conn")
+		while IFS=$'\t' read -r pk pv; do
+			case "$pk" in
+				vrr_capable) d_vrr=$pv ;;
+				Colorspace) p_cs=$pv ;;
+				"content type") p_ct=$pv ;;
+				HDR_OUTPUT_METADATA) p_hdr=$pv ;;
+				allm_capable) p_allm_cap=$pv ;;
+				allm_mode) p_allm_mode=$pv ;;
+			esac
+		done <<< "$props"
+		case "$d_vrr" in 0|1) ;; *) d_vrr="" ;; esac
+		d_crtc=$(printf '%s\n' "$mt" | modetest_crtc_index "$d_conn")
+		if [ "$d_connected" = 1 ]; then
+			# same CRTC/mode pairing as hdmi-mode.sh status: the mode line after
+			# the CRTC at (0,0); a CRTC without a mode (0x0) is skipped
+			cm=$(printf '%s\n' "$mt" | awk '
+				/^[0-9]+[ \t]+[0-9]+[ \t]+\(0,0\)/ { grab = 1; next }
+				grab && $1 ~ /^#[0-9]+$/ {
+					split($2, a, "x")
+					if (a[1] + 0 > 0) { print $2, $3; exit }
+				}
+				grab { grab = 0 }
+			') || true
+			read -r cm_name cm_hz <<< "$cm"
+			if [[ $cm_name =~ ^([0-9]+)x([0-9]+) ]]; then
+				d_mode="{\"width\":${BASH_REMATCH[1]},\"height\":${BASH_REMATCH[2]},\"refresh_hz\":$(json_num_or_null "$cm_hz"),\"name\":$(json_str "$cm_name")}"
+			fi
+		fi
+	fi
+	if [ "$d_connected" = 1 ]; then derive_display; fi
 	if [ "$d_connected" = 1 ]; then
 		if [ "$tools_edid" = 1 ] && [ -s "$JSON_SYSFS/$d_sys/edid" ]; then
 			ed=$(t5 edid-decode < "$JSON_SYSFS/$d_sys/edid" 2>/dev/null || true)
@@ -871,6 +1064,12 @@ EOF
 	fi
 	[ -z "$reasons" ] || reboot_needed=1
 
+	case "$p_allm_mode" in
+		Disabled) allm_mode=disabled ;;
+		Dynamic) allm_mode=dynamic ;;
+		"Always On") allm_mode=always_on ;;
+	esac
+
 	# one object, one write
 	local J
 	J="{\"schema\":1,\"version\":$(json_str "$VERSION"),\"generated_at\":$(json_int_or_null "$now"),\"boot_id\":$(json_nstr "$boot_id"),\"as_root\":$(json_bool "$as_root")"
@@ -878,8 +1077,11 @@ EOF
 	J="$J,\"build\":{\"module\":$(json_bool "$bmod"),\"vermagic\":$(json_nstr "$bvm"),\"matches_kernel\":$(json_bool "$bmatch")}"
 	J="$J,\"mode\":{\"running\":\"$running\",\"cmdline_mask\":$(json_nstr "$mask"),\"configured\":\"$configured\",\"marker\":$(json_bool "$marker"),\"dropin\":$(json_bool "$dropin"),\"consistent\":$(json_bool "$consistent")}"
 	J="$J,\"module\":{\"installed\":$(json_bool "$m_inst"),\"installed_vermagic\":$(json_nstr "$m_vm"),\"installed_matches_kernel\":$(json_bool "$m_match"),\"resolves_to_updates\":$(json_bool "$m_res"),\"loaded\":$(json_bool "$m_loaded"),\"taint_o\":$(json_bool "$m_taint"),\"srcversion_match\":$(json_tri "$m_srcmatch"),\"installed_after_boot\":$(json_bool "$m_after"),\"state\":\"$m_state\"}"
-	J="$J,\"display\":{\"connector\":$(json_nstr "$d_conn"),\"connected\":$(json_bool "$d_connected"),\"current_mode\":$d_mode,\"max_pixel_clock_khz\":$(json_int_or_null "$d_clock"),\"frl_modes_present\":$(json_tri "$d_frl"),\"sink_frl\":$(json_tri "$d_sink"),\"link\":{\"state\":$(json_nstr "$l_state"),\"rule\":$(json_nstr "$l_rule"),\"dump\":$(json_nstr "$l_dump"),\"active_pixel_clock_khz\":$(json_int_or_null "$l_active")}}"
+	J="$J,\"display\":{\"connector\":$(json_nstr "$d_conn"),\"connected\":$(json_bool "$d_connected"),\"current_mode\":$d_mode,\"max_pixel_clock_khz\":$(json_int_or_null "$d_clock"),\"frl_modes_present\":$(json_tri "$d_frl"),\"sink_frl\":$(json_tri "$d_sink"),\"link\":{\"state\":$(json_nstr "$l_state"),\"rule\":$(json_nstr "$l_rule"),\"dump\":$(json_nstr "$l_dump"),\"active_pixel_clock_khz\":$(json_int_or_null "$l_active")}"
+	J="$J,\"pixel\":{\"color_model\":$(json_nstr "$s_model"),\"chroma\":$(json_nstr "$s_chroma"),\"chroma_source\":$(json_nstr "$s_chroma_src"),\"bpc\":$(json_int_or_null "$s_bpc"),\"bpc_source\":$(json_nstr "$s_bpc_src"),\"colorimetry\":$(json_nstr "$s_colorimetry")}"
+	J="$J,\"hdr\":{\"active\":$(json_tri "$hdr_active"),\"eotf\":$(json_nstr "$hdr_eotf")},\"content_type\":$(json_nstr "$content_type"),\"content_type_sent\":null}"
 	J="$J,\"vrr\":{\"capable\":$(json_tri "$d_vrr"),\"range\":$vrr_range}"
+	J="$J,\"allm\":{\"capable\":$(json_tri "$p_allm_cap"),\"mode\":$(json_nstr "$allm_mode"),\"active\":null,\"driver_default\":null,\"configured\":null}"
 	J="$J,\"units\":{\"hdmi-frl-grub\":$u_grub,\"hdmi-frl-resume\":$u_resume,\"hdmi-frl-rebuild\":$u_rebuild}"
 	J="$J,\"rebuild\":{\"state\":\"$rb_state\",\"last_line\":$(json_nstr "$rb_l"),\"source_unit\":$(json_str "$src"),\"log_command\":$(json_str "journalctl -b -u $REBUILD_UNIT -u hdmi-frl-grub")}"
 	J="$J,\"reboot_needed\":$(json_bool "$reboot_needed"),\"reboot_reasons\":[$reasons],\"reboot_reason\":$(json_nstr "$reason_txt")"
