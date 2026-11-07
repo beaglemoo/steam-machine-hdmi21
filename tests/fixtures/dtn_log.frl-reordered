@@ -1,0 +1,53 @@
+[dtn begin]
+HUBP:  format  addr_hi  width  height  rot  mir  sw_mode  dcc_en  blank_en  clock_en  ttu_dis  underflow   min_ttu_vblank       qos_low_wm      qos_high_wm
+[ 0]:      8h      81h   1920    1080   0h   0h      1bh       1         0         1        0         0h          395.240            0.000           12.000
+[ 1]:      8h      81h   3840    2160   0h   0h      1bh       1         0         1        0         0h          395.240            0.000           12.000
+[ 2]:      8h      81h   3840    2160   0h   0h      1bh       1         0         1        0         0h          395.240            0.000           12.000
+[ 3]:      0h       0h      0       0   0h   0h       0h       0         0         0        0         0h            0.000            0.000            0.000
+
+=======HUBP FL======
+HUBP:  drq_exp_m  prq_exp_m  mrq_exp_m  crq_exp_m  plane1_ba  L:chunk_s  min_chu_s  meta_ch_s  min_m_c_s  dpte_gr_s  mpte_gr_s  swath_hei  pte_row_h  C:chunk_s  min_chu_s  meta_ch_s  min_m_c_s  dpte_gr_s  mpte_gr_s  swath_hei  pte_row_h
+[ 0]:         2h         1h         1h         1h         0h         3h         3h         1h         3h         3h         0h         3h         4h         3h         3h         1h         3h         3h         0h         1h         0h
+[ 1]:         2h         1h         1h         1h         0h         3h         3h         1h         3h         3h         0h         3h         6h         3h         3h         1h         3h         3h         0h         1h         0h
+[ 2]:         2h         1h         1h         1h         0h         3h         3h         1h         3h         3h         0h         3h         6h         3h         3h         1h         3h         3h         0h         1h         0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+========DLG========
+HUBP:  rc_hbe     dlg_vbe    min_d_y_n  rc_per_ht  rc_x_a_s   dst_y_a_s  dst_y_pf   dst_y_vvb  dst_y_rvb  dst_y_vfl  dst_y_rfl  rf_pix_fq  vratio_pf  vrat_pf_c  rc_pg_vbl  rc_pg_vbc  rc_mc_vbl  rc_mc_vbc  rc_pg_fll  rc_pg_flc  rc_mc_fll  rc_mc_flc  pr_nom_l   pr_nom_c   rc_pg_nl   rc_pg_nc   mr_nom_l   mr_nom_c   rc_mc_nl   rc_mc_nc   rc_ld_pl   rc_ld_pc   rc_ld_l    rc_ld_c    cha_cur0   ofst_cur1  cha_cur1   vr_af_vc0  ddrq_limt  x_rt_dlay  x_rp_dlay  x_rr_sfl  rc_td_grp
+[ 0]:         4h        97h      2420h      9610h         9h         0h        3ah         1h         ch         0h         0h      4cd5h    107c1fh     80000h         0h         0h        e1h         0h         0h         0h         0h         0h       400h         0h         0h         0h       200h         0h      2584h         0h        23h         0h        90h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 1]:         4h        97h      2420h      9610h         7h         0h        53h         1h         ch         0h         0h      4cd5h     8469eh     80000h         0h         0h        96h         0h         0h         0h         0h         0h       200h         0h         0h         0h       100h         0h       c81h         0h        47h         0h        90h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 2]:         4h        97h      2420h      9610h         7h         0h        53h         1h         ch         0h         0h      4cd5h     8469eh     80000h         0h         0h        96h         0h         0h         0h         0h         0h       200h         0h         0h         0h       100h         0h       c81h         0h        47h         0h        90h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+========TTU========
+HUBP:  qos_ll_wm  qos_lh_wm  mn_ttu_vb  qos_l_flp  rc_rd_p_l  rc_rd_l    rc_rd_p_c  rc_rd_c    rc_rd_c0   rc_rd_pc0  rc_rd_c1   rc_rd_pc1  qos_lf_l   qos_rds_l  qos_lf_c   qos_rds_c  qos_lf_c0  qos_rds_c0 qos_lf_c1  qos_rds_c1
+[ 0]:         0h       258h      4d32h         eh         0h         0h         0h         0h         0h         0h         0h         0h         8h         0h         8h         0h         0h         0h         0h         0h
+[ 1]:         0h       258h      4d32h         eh         0h         0h         0h         0h         0h         0h         0h         0h         8h         0h         8h         0h         0h         0h         0h         0h
+[ 2]:         0h       258h      4d32h         eh         0h         0h         0h         0h         0h         0h         0h         0h         8h         0h         8h         0h         0h         0h         0h         0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+
+MPCC:  OPP  DPP  MPCCBOT  MODE  ALPHA_MODE  PREMULT  OVERLAP_ONLY  IDLE
+[ 0]:   0h   0h       1h     3           0        1             0     0
+[ 1]:   0h   1h       2h     3           0        1             0     0
+[ 2]:   0h   2h       fh     2           0        1             0     0
+
+MPCC:  CNTL  LUT_MODE  MODE_CUR  WR_EN_MASK  WR_SEL  OFFSET  SCALE  START_B	START_SEG_B	END_B	END_BASE_B	MEM_PWR_ST	FORCE	DIS	MODE
+[ 0]:     0h     0h       0h     0     0     0     0     0    0h     0h       0h     0     0     0     0
+[ 1]:     0h     0h       0h     0     0     0     0     0    0h     0h       0h     0     0     0     0
+[ 2]:     0h     0h       0h     0     0     0     0     0    0h     0h       0h     0     0     0     0
+OTG:  v_bs  v_be  v_ss  v_se  vpol  vmax  vmin  vmax_sel  vmin_sel  h_bs  h_be  h_ss  h_se  hpol  htot  vtot  underflow blank_en
+[0]:  2311   151     0     5     1  6235  6235         1         1  3952   112     0    32     0  3999  2313          0        0
+
+HPO:   OTG Inst     Link   Depth   Pixel Format   ODM Segments   Lanes   Borrow   h_active   h_blank
+[0]:          0   Training      10        4:4:4              1       4   ACTIVE       3840       160
+
+DP HPO S_ENC:  Enabled  OTG   Format   Depth   Vid   SDP   Compressed  Link
+[0]:                 0    0    4:4:4       6     0     0            0     0
+[1]:                 0    0    4:4:4       6     0     0            0     0
+[2]:                 0    0    4:4:4       6     0     0            0     0
+[3]:                 0    0    4:4:4       6     0     0            0     0
+
+DP HPO L_ENC:  Enabled  Mode   Lanes   Stream  Slots   VC Rate X    VC Rate Y
+[0]:                 0    TPS1     0        0      0     0     0
+
+[1]:                 0    TPS1     0        0      0     0     0
+
+[dtn end]

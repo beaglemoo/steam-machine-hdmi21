@@ -1,0 +1,21 @@
+Fixtures for the tests in tests/. All are trimmed to what the parsers read.
+
+Real captures from a Steam Machine on SteamOS 3.9.5 (connector HDMI-A-1, FRL 4K144 HDR and TMDS 4K60,
+both with a BT2020_RGB Colorspace):
+  modetest.frl-hdr, modetest.tmds-4k60   modetest -e -c -p, HDMI-A-1 and CRTC 0 kept
+  dtn_log.frl-hdr, dtn_log.tmds-4k60     amdgpu_dm_dtn_log, tables the parsers read kept
+  crtc/frl-hdr, crtc/tmds-4k60           crtc-0/amdgpu_current_bpc and
+                                         amdgpu_current_colorspace (the colorspace
+                                         file has no trailing newline; idle CRTCs
+                                         fail with ENODEV, so they are not here)
+
+Derived by editing a real capture, not captured:
+  modetest.tmds-4k120          tmds-4k60 with CRTC 0 running 3840x2160@120 (1188000 kHz)
+  modetest.tmds-4k60-default   tmds-4k60 with the connector Colorspace property at Default
+  dtn_log.frl-420              frl-hdr with the HPO row at 4:2:0, depth 8
+  dtn_log.frl-reordered        frl-hdr with Depth and Pixel Format swapped, header and row
+  crtc/frl-420, crtc/tmds-4k120   8 bpc, BT2020_YCC
+  crtc/tmds-4k60-default          8 bpc, BT709_YCC
+
+The older modetest.* and dtn_log.* files (120hz-*, 144hz, frl, tmds, ...) are
+hand-made for tests/frl-detect.sh.
