@@ -526,7 +526,10 @@ do_status() {
 # start with "hdmi-frl: ", "rebuild complete", "ERROR" and "rebuilding inline".
 # Change them together.
 REBUILD_UNIT=${HDMI21_REBUILD_UNIT:-hdmi-frl-rebuild}
-TMDS_MAX_KHZ=1200000	# above this pixel clock only an FRL link works, as in hdmi-frl-resume.sh
+# Test-only overrides, the same ones selfheal/hdmi-frl-resume.sh honours (the
+# link probe below inherits them from the environment).
+JSON_SYSFS=${HDMI_FRL_TEST_SYSFS:-/sys/class/drm}
+JSON_DEBUGFS=${HDMI_FRL_TEST_DEBUGFS:-/sys/kernel/debug/dri}
 JSON_WARN=""
 UJ=""
 UJ_ACTIVE=""
@@ -555,6 +558,28 @@ json_num_or_null() {
 	if [[ $1 =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi
 }
 add_warn() { JSON_WARN="${JSON_WARN:+$JSON_WARN,}$(json_str "$1")"; }
+
+# Classifies the link with the rules of selfheal/hdmi-frl-resume.sh (the
+# 1.0.1 link rules), not a copy of them. The script is sourced in a child
+# process: it defines log/die/usage and its own thresholds, which must not
+# replace setup.sh's. The script is passed as $1 because while $0 equals the
+# sourced file it would run its main instead of just defining functions.
+# Prints key=value lines; fails when the script is missing or the child fails.
+# $1 = card number, $2 = sysfs name, $3 = connector name
+link_probe() {
+	local script=$SELF_DIR/selfheal/hdmi-frl-resume.sh
+	[ -r "$script" ] || return 1
+	# shellcheck disable=SC2016 # the child expands these, not this shell
+	t5 bash -c '
+		. "$1" || exit 1
+		read_link_state "$2" "$3" "$4"
+		printf "state=%s\nrule=%s\ndump=%s\nmax_khz=%s\nactive_khz=%s\nfrl_only_khz=%s\n" \
+			"$STATE" "$RULE" "$DUMP" "$MAX_KHZ" "$ACTIVE_KHZ" "$FRL_ONLY_KHZ"
+		printf "hpo_header=%s\nhpo_row=%s\nhpo_rows=%s\n" "$HPO_HEADER" \
+			"$(printf "%s\n" "$HPO_ROWS" | sed -n 1p)" \
+			"$(printf "%s" "$HPO_ROWS" | awk "END { print NR }")"
+	' _ "$script" "$1" "$2" "$3"
+}
 
 unit_env() { # VAR: value from the installed hdmi-frl-grub.service
 	{ sed -n "s/^Environment=$1=//p" "$UNIT_PATH" 2>/dev/null | head -1; } || true
@@ -622,6 +647,7 @@ do_status_json() {
 	local upd m_inst=0 m_vm="" m_match=0 m_res=0 m_loaded=0 m_taint=0 m_after=0
 	local m_srcmatch="" m_state=stock fn ls fs btime mt ed
 	local p d_sys="" d_conn="" d_card="" d_connected=0 d_clock="" d_vrr="" d_frl="" d_sink=""
+	local probe line l_state="" l_rule="" l_dump="" l_max="" l_active="" l_frl_only=""
 	local mtout res cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
 	local tools_modetest=0 tools_edid=0 jreadable=0
 	local u_grub u_resume u_rebuild a_grub a_rebuild
@@ -696,7 +722,7 @@ do_status_json() {
 	fi
 
 	# display: the first connected HDMI connector, else the first one
-	for p in /sys/class/drm/card*-HDMI-A-*; do
+	for p in "$JSON_SYSFS"/card*-HDMI-A-*; do
 		[ -e "$p" ] || continue
 		[ -n "$d_sys" ] || d_sys=${p##*/}
 		if [ "$(cat "$p/status" 2>/dev/null || true)" = connected ]; then d_sys=${p##*/}; break; fi
@@ -705,7 +731,7 @@ do_status_json() {
 		d_card=${d_sys%%-*}
 		d_conn=${d_sys#"$d_card"-}
 		d_card=${d_card#card}
-		[ "$(cat "/sys/class/drm/$d_sys/status" 2>/dev/null || true)" = connected ] && d_connected=1
+		[ "$(cat "$JSON_SYSFS/$d_sys/status" 2>/dev/null || true)" = connected ] && d_connected=1
 	fi
 	if [ "$tools_modetest" = 1 ] && [ -n "$d_conn" ]; then
 		# modetest -c: one line per mode, the pixel clock is the 12th field (as in
@@ -747,13 +773,31 @@ EOF
 	if [ "$tools_modetest" = 0 ]; then
 		add_warn "modetest is missing: display and VRR capability fields are unavailable"
 	fi
+	if [ -n "$d_sys" ]; then
+		if probe=$(link_probe "$d_card" "$d_sys" "$d_conn" 2>/dev/null); then
+			while IFS= read -r line; do
+				case ${line%%=*} in
+					state) l_state=${line#*=} ;;
+					rule) l_rule=${line#*=} ;;
+					dump) l_dump=${line#*=} ;;
+					max_khz) l_max=${line#*=} ;;
+					active_khz) l_active=${line#*=} ;;
+					frl_only_khz) l_frl_only=${line#*=} ;;
+				esac
+			done <<< "$probe"
+			case "$l_state" in frl|tmds|unknown) ;; *) l_state="" ;; esac
+			[ "$l_active" != 0 ] || l_active=""
+			# modetest unavailable or failed reads as a highest mode of 0
+			if [ "$d_connected" = 1 ] && [[ $l_max =~ ^[1-9][0-9]*$ ]] && [[ $l_frl_only =~ ^[0-9]+$ ]]; then
+				if [ "$l_max" -gt "$l_frl_only" ]; then d_frl=1; else d_frl=0; fi
+			fi
+		else
+			add_warn "the link state could not be classified: selfheal/hdmi-frl-resume.sh is missing or its probe failed"
+		fi
+	fi
 	if [ "$d_connected" = 1 ]; then
-		case "$d_clock" in
-			''|*[!0-9]*) ;;
-			*) if [ "$d_clock" -gt "$TMDS_MAX_KHZ" ]; then d_frl=1; else d_frl=0; fi ;;
-		esac
-		if [ "$tools_edid" = 1 ] && [ -s "/sys/class/drm/$d_sys/edid" ]; then
-			ed=$(t5 edid-decode < "/sys/class/drm/$d_sys/edid" 2>/dev/null || true)
+		if [ "$tools_edid" = 1 ] && [ -s "$JSON_SYSFS/$d_sys/edid" ]; then
+			ed=$(t5 edid-decode < "$JSON_SYSFS/$d_sys/edid" 2>/dev/null || true)
 			case "$ed" in
 				'') ;;
 				*"Max Fixed Rate Link"*) d_sink=1 ;;
@@ -762,7 +806,7 @@ EOF
 		fi
 	fi
 	if [ -n "$d_sys" ]; then
-		vr=/sys/kernel/debug/dri/$d_card/$d_conn/vrr_range
+		vr=$JSON_DEBUGFS/$d_card/$d_conn/vrr_range
 		if [ -r "$vr" ]; then
 			vtxt=$(cat "$vr" 2>/dev/null | tr '\n' ' ' || true)
 			vmin=$(printf '%s\n' "$vtxt" | sed -n 's/.*Min: *\([0-9][0-9]*\).*/\1/p')
@@ -834,7 +878,7 @@ EOF
 	J="$J,\"build\":{\"module\":$(json_bool "$bmod"),\"vermagic\":$(json_nstr "$bvm"),\"matches_kernel\":$(json_bool "$bmatch")}"
 	J="$J,\"mode\":{\"running\":\"$running\",\"cmdline_mask\":$(json_nstr "$mask"),\"configured\":\"$configured\",\"marker\":$(json_bool "$marker"),\"dropin\":$(json_bool "$dropin"),\"consistent\":$(json_bool "$consistent")}"
 	J="$J,\"module\":{\"installed\":$(json_bool "$m_inst"),\"installed_vermagic\":$(json_nstr "$m_vm"),\"installed_matches_kernel\":$(json_bool "$m_match"),\"resolves_to_updates\":$(json_bool "$m_res"),\"loaded\":$(json_bool "$m_loaded"),\"taint_o\":$(json_bool "$m_taint"),\"srcversion_match\":$(json_tri "$m_srcmatch"),\"installed_after_boot\":$(json_bool "$m_after"),\"state\":\"$m_state\"}"
-	J="$J,\"display\":{\"connector\":$(json_nstr "$d_conn"),\"connected\":$(json_bool "$d_connected"),\"current_mode\":$d_mode,\"max_pixel_clock_khz\":$(json_int_or_null "$d_clock"),\"frl_modes_present\":$(json_tri "$d_frl"),\"sink_frl\":$(json_tri "$d_sink")}"
+	J="$J,\"display\":{\"connector\":$(json_nstr "$d_conn"),\"connected\":$(json_bool "$d_connected"),\"current_mode\":$d_mode,\"max_pixel_clock_khz\":$(json_int_or_null "$d_clock"),\"frl_modes_present\":$(json_tri "$d_frl"),\"sink_frl\":$(json_tri "$d_sink"),\"link\":{\"state\":$(json_nstr "$l_state"),\"rule\":$(json_nstr "$l_rule"),\"dump\":$(json_nstr "$l_dump"),\"active_pixel_clock_khz\":$(json_int_or_null "$l_active")}}"
 	J="$J,\"vrr\":{\"capable\":$(json_tri "$d_vrr"),\"range\":$vrr_range}"
 	J="$J,\"units\":{\"hdmi-frl-grub\":$u_grub,\"hdmi-frl-resume\":$u_resume,\"hdmi-frl-rebuild\":$u_rebuild}"
 	J="$J,\"rebuild\":{\"state\":\"$rb_state\",\"last_line\":$(json_nstr "$rb_l"),\"source_unit\":$(json_str "$src"),\"log_command\":$(json_str "journalctl -b -u $REBUILD_UNIT -u hdmi-frl-grub")}"
