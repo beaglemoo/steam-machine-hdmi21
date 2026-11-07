@@ -1030,16 +1030,22 @@ do_status_json() {
 		case "$d_vrr" in 0|1) ;; *) d_vrr="" ;; esac
 		d_crtc=$(printf '%s\n' "$mt" | modetest_crtc_index "$d_conn")
 		if [ "$d_connected" = 1 ]; then
-			# same CRTC/mode pairing as hdmi-mode.sh status: the mode line after
-			# the CRTC at (0,0); a CRTC without a mode (0x0) is skipped
-			cm=$(printf '%s\n' "$mt" | awk '
-				/^[0-9]+[ \t]+[0-9]+[ \t]+\(0,0\)/ { grab = 1; next }
-				grab && $1 ~ /^#[0-9]+$/ {
-					split($2, a, "x")
-					if (a[1] + 0 > 0) { print $2, $3; exit }
-				}
-				grab { grab = 0 }
-			') || true
+			# the mode on the CRTC this connector is bound to (connector ->
+			# encoder -> CRTC, d_crtc is its index in the CRTCs list): the mode
+			# line after that CRTC's header; an idle CRTC (0x0) has none
+			cm=""
+			if [ -n "$d_crtc" ]; then
+				cm=$(printf '%s\n' "$mt" | awk -v want="$d_crtc" '
+					/^CRTCs:/ { sect = 1; next }
+					/^Planes:/ { sect = 0 }
+					sect && /^[0-9]+[ \t]+[0-9]+[ \t]+\(/ { grab = (n++ == want); next }
+					grab && $1 ~ /^#[0-9]+$/ {
+						split($2, a, "x")
+						if (a[1] + 0 > 0) { print $2, $3 }
+						exit
+					}
+				') || true
+			fi
 			read -r cm_name cm_hz <<< "$cm"
 			if [[ $cm_name =~ ^([0-9]+)x([0-9]+) ]]; then
 				d_mode="{\"width\":${BASH_REMATCH[1]},\"height\":${BASH_REMATCH[2]},\"refresh_hz\":$(json_num_or_null "$cm_hz"),\"name\":$(json_str "$cm_name")}"

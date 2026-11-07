@@ -28,3 +28,7 @@ captures):
                                                 with it off, and 3 (not a DC value)
   modparam/*/hdmi_allm_default                  /sys/module/amdgpu/parameters
   grubd/*/hdmi21-allm.cfg                       what hdmi-allm.sh writes
+
+Extended desktop (derived, from modetest.frl-hdr): modetest.extended has two
+active CRTCs. CRTC 109 (index 0, at 0,0) runs 1920x1080@60 for another output;
+HDMI-A-1's encoder is bound to CRTC 114 (index 1, at 1920,0), 3840x2160@144.

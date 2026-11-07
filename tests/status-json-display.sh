@@ -330,6 +330,22 @@ expect "no edid file: sink_frl null" None "$(sink)"
 # shellcheck disable=SC2016 # looking for the literal text
 expect "no -s test left on the edid path in setup.sh" 0 "$(grep -c -- '-s "\$JSON_SYSFS' "$SETUP" || true)"
 
+# Extended desktop: another output is active at (0,0) and HDMI-A-1 is bound to
+# the second CRTC. The mode, the link clock and the CRTC debugfs files must all
+# be HDMI's, not the CRTC at the origin.
+mode() { field 'json.dumps([d["display"]["current_mode"] and [d["display"]["current_mode"][k] for k in ("width","height","refresh_hz")], d["display"]["link"]["active_pixel_clock_khz"], d["display"]["pixel"]["bpc"]])'; }
+# (a dump with no HPO row, so the bit depth has to come from the CRTC's own file)
+d=$T/ext; rm -rf "$d"; mk_tree "$d" none; cp "$FX/dtn_log.tmds-4k60" "$d/dri/0/amdgpu_dm_dtn_log"
+cp -R "$FX/crtc/tmds-4k60" "$d/dri/0/crtc-0"; cp -R "$FX/crtc/frl-hdr" "$d/dri/0/crtc-1"
+status_tree "$d" "$FX/modetest.extended"
+expect "extended desktop: current_mode is HDMI's, not the CRTC at (0,0)" '[[3840, 2160, 143.99], 1332750, 10]' "$(mode)"
+status_tree "$d" "$FX/modetest.frl-hdr"
+expect "single output (same CRTC at (0,0)): unchanged" '[[3840, 2160, 143.99], 1332750, 8]' "$(mode)"
+# No encoder CRTC (the connector is not bound to one): no mode, not another output's.
+sed 's/^135\t114\tTMDS/135\t0\tTMDS/' "$FX/modetest.extended" > "$T/mt.unbound"
+status_tree "$d" "$T/mt.unbound"
+expect "connector bound to no CRTC: no current_mode" '[null, null, null]' "$(mode)"
+
 # modetest fails: hdr, content type and allm are null.
 run_status none dtn_log.frl-hdr frl-hdr
 expect "modetest fails: hdr, content type, allm null" '[null, null, null, null, null]' "$(hdr)"
