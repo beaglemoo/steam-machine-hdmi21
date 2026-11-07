@@ -167,7 +167,7 @@ or `""` for a unit state).
 | `allm` | `capable` (`allm_capable` property) and `mode` (`allm_mode` property: `disabled`, `dynamic` or `always_on`); `null` when the property is missing. `active`: ALLM is being signalled on the live stream (`crtc-N/amdgpu_current_hdmi`, patched module, root only). `driver_default`: the value the loaded module runs with (`/sys/module/amdgpu/parameters/hdmi_allm_default`; `null` for a module without patch 0003). `configured`: the value in the grub drop-in `hdmi21-allm.cfg` (`null` when none: the module default applies) |
 | `units` | `hdmi-frl-grub`, `hdmi-frl-resume`, `hdmi-frl-rebuild`, each with `load`, `enabled`, `active`, `sub`, `result`; the rebuild unit disappears once it has finished |
 | `rebuild` | `state`: `idle`, `running`, `succeeded-needs-reboot` or `failed`, read from this boot's journal; `last_line`, `source_unit`, `log_command` |
-| `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`, `allm_configured_differs` (a drop-in value is set and differs from the loaded `driver_default`); `reboot_reason` is the same in words |
+| `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`, `allm_configured_differs` (the value the next boot will use, the drop-in's or else the module default of always on, differs from the loaded `driver_default`); `reboot_reason` is the same in words |
 | `tools` | `modetest`, `edid_decode` present; `journal_readable` |
 | `warnings` | Strings; empty when everything could be read |
 

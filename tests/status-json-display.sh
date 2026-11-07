@@ -267,6 +267,20 @@ expect "drop-in matches the running value: no reboot" '[true, "always_on", "alwa
 MODPARAM=dynamic
 run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
 expect "drop-in always_on while 1 runs: reboot wanted" '[true, "dynamic", "always_on", "game", true, ["allm_configured_differs"]]' "$(allm)"
+# No drop-in (after "setup.sh allm default"): the next boot runs the module
+# default, 2. configured stays null.
+MODPARAM=dynamic GRUBD=none
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "running dynamic, no drop-in: back to the default 2 at the next boot" \
+	'[true, "dynamic", null, "game", true, ["allm_configured_differs"]]' "$(allm)"
+expect "running dynamic, no drop-in: the reason names the module default" \
+	"the next boot sets the ALLM default to always_on (the module default) but dynamic is running" "$(field 'd["reboot_reason"]')"
+MODPARAM=garbage GRUBD=none
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "unreadable parameter value, no drop-in: no reason" '[true, null, null, "game", false, []]' "$(allm)"
+MODPARAM=always-on GRUBD=none
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "running always_on, no drop-in: no reason" '[true, "always_on", null, "game", false, []]' "$(allm)"
 MODPARAM=none GRUBD=dynamic
 run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
 expect "stock module (no parameter), drop-in set: configured only, no reason" \

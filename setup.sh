@@ -565,6 +565,9 @@ JSON_SYSFS=${HDMI_FRL_TEST_SYSFS:-/sys/class/drm}
 JSON_DEBUGFS=${HDMI_FRL_TEST_DEBUGFS:-/sys/kernel/debug/dri}
 JSON_MODPARAM=${HDMI_FRL_TEST_MODPARAM:-/sys/module/amdgpu/parameters}
 JSON_GRUBD=${HDMI_FRL_TEST_GRUBD:-/etc/default/grub.d}
+# What amdgpu.hdmi_allm_default is when nothing sets it: 2, Always On, as
+# patches/0003-amdgpu-dm-hdmi-allm-default.patch compiles it in. Keep in step.
+ALLM_MODULE_DEFAULT=2
 JSON_WARN=""
 UJ=""
 UJ_ACTIVE=""
@@ -891,7 +894,7 @@ do_status_json() {
 	local p_cs="" p_ct="" p_hdr=- p_allm_cap="" p_allm_mode=""
 	local s_model="" s_chroma="" s_chroma_src="" s_bpc="" s_bpc_src="" s_colorimetry=""
 	local hdr_active="" hdr_eotf="" content_type="" allm_mode=""
-	local content_type_sent="" a_active="" a_default="" a_conf="" a_txt
+	local content_type_sent="" a_active="" a_default="" a_conf="" a_next a_src a_txt
 	local edid_tmp cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
 	local tools_modetest=0 tools_edid=0 jreadable=0
 	local u_grub u_resume u_rebuild a_grub a_rebuild
@@ -1145,9 +1148,16 @@ do_status_json() {
 		reasons="${reasons}${sep}\"mode_configured_differs\""; sep=","
 		reason_txt="${reason_txt:+$reason_txt; }the next boot is set to $configured but $running is running"
 	fi
-	if [ -n "$a_conf" ] && [ -n "$a_default" ] && [ "$a_conf" != "$a_default" ]; then
-		reasons="${reasons}${sep}\"allm_configured_differs\""; sep=","
-		reason_txt="${reason_txt:+$reason_txt; }the next boot sets the ALLM default to $(allm_name "$a_conf") but $(allm_name "$a_default") is running"
+	# The next boot runs the drop-in's value, or the module's own default when
+	# there is no drop-in (allm.configured stays null then). Only a loaded
+	# patched module (a_default set) has anything to compare.
+	if [ -n "$a_default" ]; then
+		a_next=${a_conf:-$ALLM_MODULE_DEFAULT}
+		if [ "$a_next" != "$a_default" ]; then
+			reasons="${reasons}${sep}\"allm_configured_differs\""; sep=","
+			a_src=""; [ -n "$a_conf" ] || a_src=" (the module default)"
+			reason_txt="${reason_txt:+$reason_txt; }the next boot sets the ALLM default to $(allm_name "$a_next")$a_src but $(allm_name "$a_default") is running"
+		fi
 	fi
 	[ -z "$reasons" ] || reboot_needed=1
 
