@@ -4,11 +4,15 @@
 #
 #   setup.sh install|uninstall|status [--yes|-y] [--no-reboot] [--dir DIR]
 #            [--dry-run] [--json] [-h|--help]
+#   setup.sh allm disabled|dynamic|always-on|default [--yes|-y] [--no-reboot]
+#            [--dry-run]
 #
 #   install    build the patched amdgpu module, install it and the self-heal
 #              units, switch grub to FRL, then offer a reboot
 #   uninstall  undo all of that (TMDS again, stock module, units removed)
 #   status     show what is installed and running; changes nothing
+#   allm       choose the HDMI ALLM default of the patched module for the next
+#              boot (default: the module's own default, always on)
 #
 #   --json      with status: print one JSON object (schema 1) instead of text;
 #               for tools such as the Decky plugin, see "Status as JSON" in the
@@ -28,6 +32,7 @@ SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ORIG_ARGS=("$@")
 
 CMD=""
+ALLM_ARG=""
 YES=0
 NO_REBOOT=0
 DRY=0
@@ -41,7 +46,7 @@ CACHE_DIR=$HOME/.cache/steam-machine-hdmi21
 MARKER_FILE=.installed-by-setup
 SB_VAR=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
 MIRROR_URL=https://steamdeck-packages.steamos.cloud/archlinux-mirror/sources/
-EXEC_FILES="build.sh install.sh uninstall.sh hdmi-mode.sh setup-selfheal.sh setup.sh get.sh
+EXEC_FILES="build.sh install.sh uninstall.sh hdmi-mode.sh hdmi-allm.sh setup-selfheal.sh setup.sh get.sh
 selfheal/hdmi-frl-selfheal.sh selfheal/hdmi-frl-resume.sh"
 # SHA-256 of patches/*.patch (cat in name order) as shipped in 1.0.0 and 1.0.1.
 # build.sh stamps every module with the hash of the patches it was built from;
@@ -60,7 +65,7 @@ log() { printf '[setup] %s\n' "$*"; }
 warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
 die() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 refuse() { printf '[setup] %s\n' "$*" >&2; exit 3; }
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 usage_error() { printf '[setup] %s (see --help)\n' "$*" >&2; exit 2; }
 run() {
 	if [ "$DRY" = 1 ]; then log "would run: $*"; else "$@"; fi
@@ -68,7 +73,7 @@ run() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		install|uninstall|status)
+		install|uninstall|status|allm)
 			[ -z "$CMD" ] || usage_error "more than one command given: $CMD and $1"
 			CMD=$1; shift ;;
 		--yes|-y) YES=1; shift ;;
@@ -79,10 +84,22 @@ while [ $# -gt 0 ]; do
 			[ $# -ge 2 ] || usage_error "--dir needs a path"
 			DIR_ARG=$2; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
-		*) usage_error "unknown argument: $1" ;;
+		*)
+			if [ "$CMD" = allm ] && [ -z "$ALLM_ARG" ] && [[ $1 != -* ]]; then
+				ALLM_ARG=$1; shift
+			else
+				usage_error "unknown argument: $1"
+			fi ;;
 	esac
 done
-[ -n "$CMD" ] || usage_error "no command given (install, uninstall or status)"
+[ -n "$CMD" ] || usage_error "no command given (install, uninstall, status or allm)"
+if [ "$CMD" = allm ]; then
+	case "$ALLM_ARG" in
+		disabled|dynamic|always-on|default) ;;
+		'') usage_error "allm needs disabled, dynamic, always-on or default" ;;
+		*) usage_error "unknown ALLM mode: $ALLM_ARG (use disabled, dynamic, always-on or default)" ;;
+	esac
+fi
 [ "$JSON" = 0 ] || [ "$CMD" = status ] || usage_error "--json only works with status"
 
 # --- exit handling --------------------------------------------------------
@@ -460,8 +477,9 @@ do_uninstall() {
 		log "no rebuild running"
 	fi
 
-	STEP=2; log "step 2/4: back to TMDS in grub"
+	STEP=2; log "step 2/4: back to TMDS and the default ALLM setting in grub"
 	run sudo sh "$SELF_DIR/hdmi-mode.sh" tmds
+	run sudo sh "$SELF_DIR/hdmi-allm.sh" default
 
 	STEP=3; log "step 3/4: remove the patched module"
 	if [ "$DRY" = 1 ]; then dry_forward uninstall.sh; else sudo bash "$SELF_DIR/uninstall.sh"; fi
@@ -489,6 +507,20 @@ do_uninstall() {
 	offer_reboot "go back to the stock amdgpu module"
 }
 
+# --- allm -----------------------------------------------------------------
+do_allm() {
+	local k
+	k=$(uname -r)
+	if [ "$DRY" = 0 ] && [ ! -f "/lib/modules/$k/updates/amdgpu.ko.zst" ]; then
+		warn "the patched amdgpu module is not installed for $k; the setting is stored and used once it is"
+	fi
+	log "ALLM default: $ALLM_ARG"
+	run sudo sh "$SELF_DIR/hdmi-allm.sh" "$ALLM_ARG"
+	log "only the patched amdgpu module reads this setting, and the TV needs its"
+	log "Instant Game Response (ALLM) option on"
+	offer_reboot "apply the ALLM setting"
+}
+
 # --- status ---------------------------------------------------------------
 do_status() {
 	local k vm unit
@@ -504,6 +536,7 @@ do_status() {
 		echo "built       no module for this kernel in $INSTALL_DIR/out"
 	fi
 	sh "$SELF_DIR/hdmi-mode.sh" status || true
+	sh "$SELF_DIR/hdmi-allm.sh" status || true
 	for unit in hdmi-frl-grub hdmi-frl-resume hdmi-frl-rebuild; do
 		printf '%-18s enabled=%s active=%s\n' "$unit" \
 			"$(systemctl is-enabled "$unit" 2>/dev/null || true)" \
@@ -1104,3 +1137,7 @@ case "$CMD" in
 		preflight_install
 		do_install ;;
 esac
+	allm)
+		preflight_basic
+		start_logging
+		do_allm ;;
