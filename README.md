@@ -143,7 +143,7 @@ prints one JSON object (schema 1) on stdout and nothing else, for tools such as
 a Decky plugin. It changes nothing, exits 0 whenever it prints the object, and
 puts problems it noticed into `warnings`. It reads the install and state
 directories from `hdmi-frl-grub.service`, so it gives the same answer run as
-root or as `deck`; some fields need root (the VRR range) or the journal. `--json`
+root or as `deck`; some fields need root (the VRR range, the link dump, pixel format, bit depth and colorimetry) or the journal. `--json`
 with `install` or `uninstall` is a usage error (exit 2). Text is reduced to
 printable ASCII. A value that cannot be read is `null` (or `false` for a flag,
 or `""` for a unit state).
@@ -156,8 +156,14 @@ or `""` for a unit state).
 | `build` | `module`: `out/amdgpu-<kernel>.ko.zst` exists; `vermagic`; `matches_kernel` |
 | `mode` | `running` (`FRL` if bit `0x400` is set in the last `amdgpu.dcfeaturemask` on the cmdline), `cmdline_mask`, `configured` (marker file present = `FRL`), `marker`, `dropin` (grub drop-in), `consistent` (marker and drop-in agree) |
 | `module` | `installed` override in `updates/`, its `installed_vermagic` and `installed_matches_kernel`, `resolves_to_updates`, `loaded`, `taint_o`, `srcversion_match` (loaded vs installed, `null` if unknown), `installed_after_boot`, and `state`: `patched-loaded`, `installed-needs-reboot` or `stock` |
-| `display` | `connector`, `connected`, `current_mode` (`width`, `height`, `refresh_hz`, `name`), `max_pixel_clock_khz`, `frl_modes_present` (a mode above 1,200,000 kHz), `sink_frl` (the EDID advertises "Max Fixed Rate Link") |
+| `display` | `connector`, `connected`, `current_mode` (`width`, `height`, `refresh_hz`, `name`), `max_pixel_clock_khz`, `frl_modes_present` (a mode above 1,200,000 kHz in the mode list: the capability, not the link in use), `sink_frl` (the EDID advertises "Max Fixed Rate Link"), plus the objects below |
+| `display.link` | The link in use, classified with the rules `selfheal/hdmi-frl-resume.sh` uses: `state` (`frl`, `tmds` or `unknown`), `rule` (which rule decided it), `dump` (`hpo`, `nohpo` or `incomplete`: what the `amdgpu_dm_dtn_log` debugfs dump showed, root only), `active_pixel_clock_khz` (the CRTC's mode, `null` when idle). All `null`, with a warning, when the script is missing or fails |
+| `display.pixel` | `color_model` (`rgb` or `ycbcr`, from the CRTC colorspace; `null` when it cannot be told), `chroma` (`4:4:4`, `4:2:2` or `4:2:0`) with `chroma_source` (`hpo`: the dump's HPO row, FRL only; `rgb`: RGB implies 4:4:4; `tmds-clock`: a TMDS link above 600 MHz can only carry 4:2:0), `bpc` with `bpc_source` (`hpo` or `crtc`), `colorimetry` (the CRTC colorspace name, for example `BT2020_RGB`). The HPO row and the CRTC debugfs files need root; without them these are `null` and a warning says so. A TMDS link below 600 MHz with YCbCr leaves `chroma` `null` |
+| `display.hdr` | `active` (the HDR_OUTPUT_METADATA EOTF is not SDR; `false` for an empty blob) and `eotf` (`sdr`, `hdr_gamma`, `pq`, `hlg`) |
+| `display.content_type` | The connector's `content type` property: `no_data`, `graphics`, `photo`, `cinema` or `game`. This is the requested value |
+| `display.content_type_sent` | Always `null` for now |
 | `vrr` | `capable` (`vrr_capable` property) and `range` (`min_hz`, `max_hz` from debugfs, root only; `null` when 0 to 0) |
+| `allm` | `capable` (`allm_capable` property) and `mode` (`allm_mode` property: `disabled`, `dynamic` or `always_on`); `null` when the property is missing. `active`, `driver_default` and `configured` are `null` for now |
 | `units` | `hdmi-frl-grub`, `hdmi-frl-resume`, `hdmi-frl-rebuild`, each with `load`, `enabled`, `active`, `sub`, `result`; the rebuild unit disappears once it has finished |
 | `rebuild` | `state`: `idle`, `running`, `succeeded-needs-reboot` or `failed`, read from this boot's journal; `last_line`, `source_unit`, `log_command` |
 | `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`; `reboot_reason` is the same in words |
