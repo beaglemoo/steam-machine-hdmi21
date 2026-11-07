@@ -341,21 +341,41 @@ patch_applied() {
 	0002-*)
 		[ -f "$LINK_DETECTION_C" ] \
 			&& ! grep -q 'config.skip_frl_pretraining' "$LINK_DETECTION_C" ;;
+	0003-*)
+		grep -q hdmi_allm_default "$DM_C" 2>/dev/null ;;
 	*)
 		die "no sanity check defined for $(basename "$1")" ;;
 	esac
+}
+
+# Patches whose name starts with 0003- are optional: the first two are what
+# gives the sink VRR, 0003 is a convenience on top (ALLM default). If an optional
+# patch no longer applies to a newer kernel, the build carries on without it and
+# the name is recorded in $SRC/.hdmi21-skipped so a re-run does not retry it
+# against the same checkout forever.
+is_optional_patch() {
+	case "$(basename "$1")" in
+		0003-*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+skipped_patch() {
+	[ -f "$SRC/.hdmi21-skipped" ] && grep -qxF "$(basename "$1")" "$SRC/.hdmi21-skipped"
 }
 
 # An existing checkout may predate a patch that was added since it was made.
 # Applying only the missing ones on top is fragile (the earlier ones are already
 # commits, order and context would have to be tracked), so a checkout that is
 # missing any patch is simply not reusable: it gets thrown away and every patch
-# is applied to a fresh clone of the tag.
+# is applied to a fresh clone of the tag. An optional patch recorded as skipped
+# does not count as missing.
 reusable_src() {
 	[ -d "$SRC/.git" ] || return 1
 	git -C "$SRC" merge-base --is-ancestor "$TAG_COMMIT" HEAD 2>/dev/null || return 1
 	local p
 	for p in "${PATCHES[@]}"; do
+		skipped_patch "$p" && continue
 		patch_applied "$p" || {
 			log "checkout      $SRC is missing $(basename "$p"), re-creating it"
 			return 1
@@ -376,6 +396,11 @@ else
 		git -C "$SRC" -c user.name='steam-machine-hdmi21' \
 			-c user.email='hdmi21@localhost' am "$p" || {
 			git -C "$SRC" am --abort || true
+			if is_optional_patch "$p"; then
+				log "WARNING $(basename "$p") is optional and does not apply to $TAG, building without it"
+				printf '%s\n' "$(basename "$p")" >> "$SRC/.hdmi21-skipped"
+				continue
+			fi
 			die "$(basename "$p") does not apply to $TAG; this kernel may already carry the fix or need an updated patch"
 		}
 		patch_applied "$p" \

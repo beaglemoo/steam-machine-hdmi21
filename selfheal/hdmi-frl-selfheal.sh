@@ -4,6 +4,7 @@
 # /lib/modules:
 #   1. the grub drop-in and the amdgpu.dcfeaturemask=0x402 cmdline
 #   2. the patched amdgpu module in /lib/modules/<running>/updates/
+#   3. the ALLM grub drop-in chosen with hdmi-allm.sh, from its marker
 #
 # If the running kernel changed and no matching module has been built yet, the
 # rebuild (build.sh, then install.sh) is started as a detached transient unit
@@ -11,7 +12,8 @@
 #   journalctl -fu hdmi-frl-rebuild
 #
 # Everything keys off the marker file $STATE_DIR/.hdmi-frl-enabled. No marker
-# means TMDS was chosen: the drop-in is removed and nothing else happens.
+# means TMDS was chosen: the drop-in is removed and nothing else happens. The
+# ALLM drop-in follows its own marker, $STATE_DIR/.hdmi21-allm, in either mode.
 set -u
 
 REPO_DIR=${HDMI_FRL_REPO:-$(cd -- "$(dirname -- "$0")/.." && pwd)}
@@ -19,6 +21,8 @@ STATE_DIR=${STATE_DIR:-/home/deck}
 MARKER=$STATE_DIR/.hdmi-frl-enabled
 DROPIN=/etc/default/grub.d/hdmi-frl.cfg
 MASK=amdgpu.dcfeaturemask=0x402
+ALLM_MARKER=$STATE_DIR/.hdmi21-allm
+ALLM_DROPIN=/etc/default/grub.d/hdmi21-allm.cfg
 K=$(uname -r)
 TARGET=/lib/modules/$K/updates/amdgpu.ko.zst
 MODULE=$REPO_DIR/out/amdgpu-$K.ko.zst
@@ -41,6 +45,21 @@ do_rebuild() {
 if [ "${1:-}" = "rebuild" ]; then
 	do_rebuild
 	exit 0
+fi
+
+# --- ALLM drop-in ---------------------------------------------------------
+if [ -f "$ALLM_MARKER" ]; then
+	if [ ! -f "$ALLM_DROPIN" ]; then
+		if STATE_DIR=$STATE_DIR "$REPO_DIR/hdmi-allm.sh" restore >/dev/null; then
+			log "ALLM drop-in was missing, recreated from the marker"
+		else
+			log "ALLM drop-in was missing and could not be recreated"
+		fi
+	fi
+elif [ -f "$ALLM_DROPIN" ]; then
+	rm -f "$ALLM_DROPIN"
+	update-grub
+	log "ALLM marker absent, removed stale grub drop-in"
 fi
 
 # --- marker ---------------------------------------------------------------

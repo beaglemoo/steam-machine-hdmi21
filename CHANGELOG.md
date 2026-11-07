@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-11-07
+
+### Added
+
+- `setup.sh status --json` prints the whole state (build, mode, module,
+  display, VRR, units, rebuild progress, reboot reasons) as one JSON object for
+  tools such as a Decky plugin. Plain `status` is unchanged.
+- The JSON reports the live signal: link state and the rule that decided it,
+  pixel format (RGB or YCbCr and chroma), bits per colour, HDR and its transfer
+  function, and the HDMI content type. Fields the driver does not expose read
+  as null rather than a guess.
+- HDMI ALLM (Auto Low Latency Mode) is on by default. Patch 0003 adds the
+  module parameter `amdgpu.hdmi_allm_default` (0 disabled, 1 dynamic, 2 always
+  on) and applies it whenever the display output is set up, because gamescope
+  never sets ALLM itself. `setup.sh allm disabled|dynamic|always-on|default`
+  changes it for the next boot. The patch is optional: if it stops applying on
+  a future kernel the build continues without it.
+- A debugfs file, `crtc-N/amdgpu_current_hdmi`, reads back whether ALLM is
+  being sent and which content type the stream carries.
+
+### Changed
+
+- `status --json` classifies the link with the 1.0.1 rules instead of a pixel
+  clock threshold, so 120 Hz TVs on FRL report correctly.
+- Upgrading from 1.0.x rebuilds the module once, because the patch set changed.
+
 ## [1.0.1] - 2026-10-23
 
 ### Fixed

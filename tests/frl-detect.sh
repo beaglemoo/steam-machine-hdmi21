@@ -99,6 +99,13 @@ expect "HPO rows are printed for --check" \
 	"[0]:          0   Training        4:4:4      10              1       4   ACTIVE       3840        160" \
 	"$(classify_dtn_log rows < "$FX/dtn_log.frl")"
 expect "tmds fixture has no HPO rows" "" "$(classify_dtn_log rows < "$FX/dtn_log.tmds")"
+HPO_HEADER_LINE="HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow   h_active   h_blank"
+expect "the HPO header is printed with the rows" "$HPO_HEADER_LINE" "$(classify_dtn_log header < "$FX/dtn_log.frl")"
+expect "tmds fixture has no HPO header (the DP HPO tables do not count)" "" "$(classify_dtn_log header < "$FX/dtn_log.tmds")"
+expect "an HPO header with no row is not kept" "" \
+	"$(grep -v '^\[0\]:          0   Training' "$FX/dtn_log.frl" | classify_dtn_log header)"
+expect "two HPO blocks keep the first header" "$HPO_HEADER_LINE" \
+	"$( { cat "$FX/dtn_log.frl"; sed -n '/^HPO:/,/^\[0\]:.*Training/p' "$FX/dtn_log.frl"; } | classify_dtn_log header)"
 
 # modetest_clocks: "<highest> <active>" for one connector. The fixtures carry a
 # DP-1 with a 1332750 kHz mode on its own CRTC, which must not leak in.
@@ -140,9 +147,15 @@ M120_60=$FX/modetest.120hz-active60
 set_dump "$R" dtn_log.frl
 expect "(a) HPO row, 4K120 active: frl" frl "$(state_of "$R" "$M120")"
 expect "(a) decided by hpo-row" hpo-row "$(rule_of "$R" "$M120")"
+# read_link_state keeps the header of the table the rows came from. read_state
+# runs in this shell here (not in a command substitution) so the global is seen.
+read_state "$R" "$M120" > /dev/null
+expect "(a) HPO_HEADER is set with the HPO row" "$HPO_HEADER_LINE" "$HPO_HEADER"
 set_dump "$R" dtn_log.tmds
 expect "(b) no HPO, mode list up to 1332750: frl" frl "$(state_of "$R" "$FX/modetest.144hz")"
 expect_in "(b) decided by the mode list" "mode-list >1200000 (1332750 kHz)" "$(rule_of "$R" "$FX/modetest.144hz")"
+read_state "$R" "$M120" > /dev/null
+expect "(c) HPO_HEADER is empty without an HPO row" "" "$HPO_HEADER"
 expect "(c) no HPO, 4K120 active: tmds" tmds "$(state_of "$R" "$M120")"
 expect "(c) decided by the active mode" "active 1188000 kHz without HPO" "$(rule_of "$R" "$M120")"
 expect "(d) no HPO, 4K60 active on a 120 Hz TV: unknown" unknown "$(state_of "$R" "$M120_60")"
@@ -320,21 +333,28 @@ KREL=7.2.4-valve1-1-neptune-72-g0123456789ab
 
 U=$T/upgrade
 mkdir -p "$U/out" "$U/patches"
-cp "$HERE"/../patches/*.patch "$U/patches/"
+# The patch set 1.0.0 and 1.0.1 shipped; 0003 (ALLM) came with 1.1.0.
+cp "$HERE"/../patches/000[12]-*.patch "$U/patches/"
 printf 'x' > "$U/out/amdgpu-$KREL.ko.zst"
 echo "$KREL SMP preempt mod_unload" > "$U/out/amdgpu-$KREL.ko.zst.vermagic"
 current() { # vermagic kernel -> yes|no
 	if SELF_DIR=$U STUB_VERMAGIC=$1 PATH="$T/bin:$PATH" module_is_current; then echo yes; else echo no; fi
 }
-expect "1.0.0 module (no stamp, shipped patches) is kept" yes "$(current "$KREL")"
+expect "1.0.0 module (no stamp, patches 0001 and 0002) is kept" yes "$(current "$KREL")"
 echo "$LEGACY_PATCHES_SHA" > "$U/out/amdgpu-$KREL.ko.zst.patches"
 expect "stamped module with the same patches is kept" yes "$(current "$KREL")"
+cp "$HERE"/../patches/*.patch "$U/patches/"
+expect "a 1.0.x module is rebuilt once patch 0003 ships" no "$(current "$KREL")"
+cat "$U"/patches/*.patch | sha256sum | cut -d' ' -f1 > "$U/out/amdgpu-$KREL.ko.zst.patches"
+expect "a module stamped with the full patch set is kept" yes "$(current "$KREL")"
+rm "$U/patches/0003-"*.patch
+echo "$LEGACY_PATCHES_SHA" > "$U/out/amdgpu-$KREL.ko.zst.patches"
 echo deadbeef > "$U/out/amdgpu-$KREL.ko.zst.patches"
 expect "stamp from different patches forces a rebuild" no "$(current "$KREL")"
 rm "$U/out/amdgpu-$KREL.ko.zst.patches"
 echo "# changed" >> "$U/patches/0001-amdgpu-dm-frl-vrr-freesync-caps.patch"
 expect "changed patches force a rebuild even with no stamp" no "$(current "$KREL")"
-cp "$HERE"/../patches/*.patch "$U/patches/"
+cp "$HERE"/../patches/000[12]-*.patch "$U/patches/"
 expect "module built for another kernel forces a rebuild" no "$(current 7.2.5-other)"
 expect "HDMI21_REBUILD=1 forces a rebuild" no \
 	"$(HDMI21_REBUILD=1 current "$KREL")"

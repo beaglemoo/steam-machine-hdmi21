@@ -1,0 +1,157 @@
+From e9a68a3c3fc44564c5cda848b21d191f0c1f6b89 Mon Sep 17 00:00:00 2001
+From: steam-machine-hdmi21 <hdmi21@localhost>
+Date: Sat, 7 Nov 2026 12:47:46 +0000
+Subject: [PATCH] drm/amd/display: default HDMI ALLM from a module parameter
+ and apply it to new streams
+
+The allm_mode connector property is created Disabled and the DC stream
+only learns about ALLM when allm_mode changes on an existing stream
+(amdgpu_dm_atomic_commit_tail). A new stream is zeroed and its HF-VSIF
+is built with the ALLM bit clear, so there is no way to have ALLM on
+from the first frame after a modeset, and a default value for the
+property alone would do nothing.
+
+Add the amdgpu.hdmi_allm_default module parameter (0 disabled, 1 dynamic,
+2 always on; default 2, any other value means 0). amdgpu_dm_connector_funcs_reset()
+uses it as the initial allm_mode of HDMI-A connectors. When
+dm_update_crtc_state() assigns a new stream to an ALLM-capable HDMI
+connector, evaluate update_allm_state_on_crtc_stream() against the
+connector's current allm_mode and rebuild the HF-VSIF, so the ALLM bit
+is in the infoframe from the first frame on both TMDS and FRL links.
+Userspace can still change allm_mode afterwards; the existing
+property-change path handles that.
+
+Add crtc-N/amdgpu_current_hdmi to debugfs, next to amdgpu_current_bpc,
+reporting allm_active and content_type of the live stream so the result
+can be verified. It fails with -ENODEV when the crtc has no stream.
+---
+ .../gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 45 +++++++++++++++++++
+ .../amd/display/amdgpu_dm/amdgpu_dm_debugfs.c | 35 +++++++++++++++
+ 2 files changed, 80 insertions(+)
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index 11fb78d2c9e7..7df5403f9135 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -110,6 +110,28 @@
+ 
+ static_assert(AMDGPU_DMUB_NOTIFICATION_MAX == DMUB_NOTIFICATION_MAX, "AMDGPU_DMUB_NOTIFICATION_MAX mismatch");
+ 
++/*
++ * Initial value of the HDMI "allm_mode" connector property. The property
++ * itself still defaults to Disabled in the DRM core and userspace can change
++ * it at any time; this only picks the value a connector starts with.
++ */
++static int amdgpu_dm_hdmi_allm_default = DRM_ALLM_MODE_ENABLED_FORCED;
++module_param_named(hdmi_allm_default, amdgpu_dm_hdmi_allm_default, int, 0444);
++MODULE_PARM_DESC(hdmi_allm_default,
++		 "Initial HDMI ALLM mode (0 = disabled, 1 = dynamic, 2 = always on (default)); other values mean 0");
++
++static enum drm_allm_mode amdgpu_dm_get_hdmi_allm_default(void)
++{
++	switch (amdgpu_dm_hdmi_allm_default) {
++	case DRM_ALLM_MODE_ENABLED_DYNAMIC:
++		return DRM_ALLM_MODE_ENABLED_DYNAMIC;
++	case DRM_ALLM_MODE_ENABLED_FORCED:
++		return DRM_ALLM_MODE_ENABLED_FORCED;
++	default:
++		return DRM_ALLM_MODE_DISABLED;
++	}
++}
++
+ #define FIRMWARE_RENOIR_DMUB "amdgpu/renoir_dmcub.bin"
+ MODULE_FIRMWARE(FIRMWARE_RENOIR_DMUB);
+ #define FIRMWARE_SIENNA_CICHLID_DMUB "amdgpu/sienna_cichlid_dmcub.bin"
+@@ -8445,6 +8467,9 @@ void amdgpu_dm_connector_funcs_reset(struct drm_connector *connector)
+ 		state->vcpi_slots = 0;
+ 		state->pbn = 0;
+ 
++		if (connector->connector_type == DRM_MODE_CONNECTOR_HDMIA)
++			state->base.allm_mode = amdgpu_dm_get_hdmi_allm_default();
++
+ 		if (connector->connector_type == DRM_MODE_CONNECTOR_eDP) {
+ 			if (amdgpu_dm_abm_level <= 0)
+ 				state->abm_level = ABM_LEVEL_IMMEDIATE_DISABLE;
+@@ -12715,6 +12740,26 @@ static int dm_update_crtc_state(struct amdgpu_display_manager *dm,
+ 	get_freesync_config_for_crtc(dm_new_crtc_state,
+ 				     dm_new_conn_state);
+ 
++	/*
++	 * A new stream starts with hdmi_allm_active = false and an HF-VSIF built
++	 * from that, and ALLM is otherwise only evaluated when the allm_mode
++	 * property changes. Evaluate it for every new stream so the connector's
++	 * current allm_mode (including the module parameter default) takes effect.
++	 */
++	if (dm_new_crtc_state->stream != dm_old_crtc_state->stream &&
++	    aconnector && aconnector->hdmi_allm_capable &&
++	    dc_is_hdmi_signal(dm_new_crtc_state->stream->signal)) {
++		update_allm_state_on_crtc_stream(dm_new_crtc_state, drm_new_conn_state);
++		mod_build_hf_vsif_infopacket(dm_new_crtc_state->stream,
++			&dm_new_crtc_state->stream->hfvsif_infopacket);
++
++		drm_dbg_kms(adev_to_drm(adev),
++			    "HDMI ALLM %s (allm_mode %d, content type %d)\n",
++			    dm_new_crtc_state->stream->hdmi_allm_active ? "on" : "off",
++			    drm_new_conn_state->allm_mode,
++			    dm_new_crtc_state->stream->content_type);
++	}
++
+ 	allow_freesync = dm_new_crtc_state->freesync_config.state == VRR_STATE_ACTIVE_VARIABLE;
+ 	old_allow_freesync = dm_old_crtc_state->freesync_config.state == VRR_STATE_ACTIVE_VARIABLE;
+ 
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_debugfs.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_debugfs.c
+index e5bc9c051587..61857b7bdd95 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_debugfs.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_debugfs.c
+@@ -1188,6 +1188,39 @@ static int amdgpu_current_colorspace_show(struct seq_file *m, void *data)
+ }
+ DEFINE_SHOW_ATTRIBUTE(amdgpu_current_colorspace);
+ 
++/*
++ * Returns the HDMI ALLM state of the live stream on the crtc.
++ * content_type is the DC enum (0 no data, 1 graphics, 2 photo, 4 cinema, 8 game).
++ * Example usage: cat /sys/kernel/debug/dri/0/crtc-0/amdgpu_current_hdmi
++ */
++static int amdgpu_current_hdmi_show(struct seq_file *m, void *data)
++{
++	struct drm_crtc *crtc = m->private;
++	struct drm_device *dev = crtc->dev;
++	struct dm_crtc_state *dm_crtc_state = NULL;
++	int res = -ENODEV;
++
++	mutex_lock(&dev->mode_config.mutex);
++	drm_modeset_lock(&crtc->mutex, NULL);
++	if (crtc->state == NULL)
++		goto unlock;
++
++	dm_crtc_state = to_dm_crtc_state(crtc->state);
++	if (dm_crtc_state->stream == NULL)
++		goto unlock;
++
++	seq_printf(m, "allm_active: %d\n", dm_crtc_state->stream->hdmi_allm_active ? 1 : 0);
++	seq_printf(m, "content_type: %d\n", dm_crtc_state->stream->content_type);
++	res = 0;
++
++unlock:
++	drm_modeset_unlock(&crtc->mutex);
++	mutex_unlock(&dev->mode_config.mutex);
++
++	return res;
++}
++DEFINE_SHOW_ATTRIBUTE(amdgpu_current_hdmi);
++
+ 
+ /*
+  * Example usage:
+@@ -4108,6 +4141,8 @@ void crtc_debugfs_init(struct drm_crtc *crtc)
+ 			    crtc, &amdgpu_current_bpc_fops);
+ 	debugfs_create_file("amdgpu_current_colorspace", 0644, crtc->debugfs_entry,
+ 			    crtc, &amdgpu_current_colorspace_fops);
++	debugfs_create_file("amdgpu_current_hdmi", 0444, crtc->debugfs_entry,
++			    crtc, &amdgpu_current_hdmi_fops);
+ }
+ 
+ /*
+-- 
+2.56.0
+
