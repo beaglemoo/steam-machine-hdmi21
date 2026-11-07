@@ -78,6 +78,7 @@ MAX_KHZ=0		# highest mode clock the connector lists
 ACTIVE_KHZ=0		# clock of the mode its CRTC runs, 0 if none
 MODETEST_OK=0		# 1 when modetest ran
 HPO_ROWS=""		# the HPO table rows of the last read, if any
+HPO_HEADER=""		# the header line of the table those rows are under
 
 log() { printf 'hdmi-frl-resume: %s\n' "$*"; }
 die() { printf 'hdmi-frl-resume: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -92,8 +93,9 @@ frl_mask_set() {
 }
 
 # --- link state -----------------------------------------------------------
-# Reads a dtn_log dump on stdin. "rows" prints the HPO table rows, anything
-# else prints the verdict on the dump:
+# Reads a dtn_log dump on stdin. "rows" prints the HPO table rows, "header"
+# prints the header line of the first HPO table that has a row, anything else
+# prints the verdict on the dump:
 #   hpo         at least one row under the "HPO:" header
 #   nohpo       no such row, but the dump is complete ([dtn begin] and
 #               [dtn end]) and an OTG row shows that something is being driven
@@ -101,21 +103,22 @@ frl_mask_set() {
 # A header is only recognised at the start of a line, so the "DP HPO S_ENC:"
 # and "DP HPO L_ENC:" tables of a DisplayPort output do not count. The Link
 # column is ignored: a healthy FRL link has been seen reading "Training".
-classify_dtn_log() { # [rows]
+classify_dtn_log() { # [rows|header]
 	awk -v want="${1:-state}" '
 		/^\[dtn begin\]/ { begin = 1; next }
 		/^\[dtn end\]/ { end = 1; next }
 		/^[ \t\r]*$/ { sect = ""; next }
 		/^\[[0-9]+\]:/ {
 			if (sect == "otg") otg++
-			else if (sect == "hpo") { hpo++; rows = rows (rows == "" ? "" : "\n") $0 }
+			else if (sect == "hpo") { hpo++; if (hdr == "") hdr = curhdr; rows = rows (rows == "" ? "" : "\n") $0 }
 			next
 		}
 		/^OTG:/ { sect = "otg"; next }
-		/^HPO:/ { sect = "hpo"; next }
+		/^HPO:/ { sect = "hpo"; curhdr = $0; next }
 		{ sect = "" }
 		END {
 			if (want == "rows") { if (rows != "") print rows; exit }
+			if (want == "header") { if (hdr != "") print hdr; exit }
 			if (hpo > 0) print "hpo"
 			else if (begin && end && otg > 0) print "nohpo"
 			else print "incomplete"
@@ -163,14 +166,15 @@ modetest_clocks() {
 }
 
 # Reads dtn_log and modetest for one connector and applies the rules. Sets
-# STATE, RULE, INPUTS and the values they came from.
+# STATE, RULE, INPUTS and the values they came from (HPO_ROWS and HPO_HEADER
+# included).
 # $1 = card number, $2 = sysfs name, $3 = connector name
 read_link_state() {
 	local dtn=$DEBUGFS/$1/amdgpu_dm_dtn_log
 	local enabled=$DRM_SYSFS/$2/enabled text out
 
 	STATE=unknown; RULE=""; INPUTS=""
-	DUMP=incomplete; DUMP_WHY=""; HPO_ROWS=""
+	DUMP=incomplete; DUMP_WHY=""; HPO_ROWS=""; HPO_HEADER=""
 	MAX_KHZ=0; ACTIVE_KHZ=0; MODETEST_OK=0
 
 	if [ -r "$enabled" ] && [ "$(cat "$enabled" 2>/dev/null || true)" != enabled ]; then
@@ -184,6 +188,8 @@ read_link_state() {
 	else
 		DUMP=$(printf '%s\n' "$text" | classify_dtn_log)
 		HPO_ROWS=$(printf '%s\n' "$text" | classify_dtn_log rows)
+		# shellcheck disable=SC2034 # read by setup.sh status --json (link_probe) and the tests
+		HPO_HEADER=$(printf '%s\n' "$text" | classify_dtn_log header)
 		[ "$DUMP" != incomplete ] || DUMP_WHY="the dump is cut short or nothing is being driven yet"
 	fi
 
