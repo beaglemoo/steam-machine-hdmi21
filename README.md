@@ -78,7 +78,8 @@ other scripts yourself after `setup.sh install`; it has already run them.
 
 1. Builds a patched `amdgpu` module for the running kernel (`build.sh`). This
    installs the kernel headers and `base-devel` if they are missing, downloads
-   the Valve source, applies the two patches and compiles. The first run takes a
+   the Valve source, applies the patches (the third, ALLM, is optional: if it
+   does not apply to a newer kernel it is skipped with a warning) and compiles. The first run takes a
    while: the download is 3.4 GB, extracting it takes a few minutes and the
    build 2-4 minutes.
 2. Installs the module as an override in `/lib/modules/<kernel>/updates/`
@@ -161,18 +162,50 @@ or `""` for a unit state).
 | `display.pixel` | `color_model` (`rgb` or `ycbcr`, from the CRTC colorspace; `null` when it cannot be told), `chroma` (`4:4:4`, `4:2:2` or `4:2:0`) with `chroma_source` (`hpo`: the dump's HPO row, FRL only; `rgb`: RGB implies 4:4:4; `tmds-clock`: a TMDS link above 600 MHz can only carry 4:2:0), `bpc` with `bpc_source` (`hpo` or `crtc`), `colorimetry` (the CRTC colorspace name, for example `BT2020_RGB`). The HPO row and the CRTC debugfs files need root; without them these are `null` and a warning says so. A TMDS link below 600 MHz with YCbCr leaves `chroma` `null` |
 | `display.hdr` | `active` (the HDR_OUTPUT_METADATA EOTF is not SDR; `false` for an empty blob) and `eotf` (`sdr`, `hdr_gamma`, `pq`, `hlg`) |
 | `display.content_type` | The connector's `content type` property: `no_data`, `graphics`, `photo`, `cinema` or `game`. This is the requested value |
-| `display.content_type_sent` | Always `null` for now |
+| `display.content_type_sent` | The content type of the live stream, from `crtc-N/amdgpu_current_hdmi` (patched module, root only). The driver prints its own enum (0 no data, 1 graphics, 2 photo, 4 cinema, 8 game), which is mapped to the same names as `content_type`; any other number is `null` with a warning. `null` with no stream |
 | `vrr` | `capable` (`vrr_capable` property) and `range` (`min_hz`, `max_hz` from debugfs, root only; `null` when 0 to 0) |
-| `allm` | `capable` (`allm_capable` property) and `mode` (`allm_mode` property: `disabled`, `dynamic` or `always_on`); `null` when the property is missing. `active`, `driver_default` and `configured` are `null` for now |
+| `allm` | `capable` (`allm_capable` property) and `mode` (`allm_mode` property: `disabled`, `dynamic` or `always_on`); `null` when the property is missing. `active`: ALLM is being signalled on the live stream (`crtc-N/amdgpu_current_hdmi`, patched module, root only). `driver_default`: the value the loaded module runs with (`/sys/module/amdgpu/parameters/hdmi_allm_default`; `null` for a module without patch 0003). `configured`: the value in the grub drop-in `hdmi21-allm.cfg` (`null` when none: the module default applies) |
 | `units` | `hdmi-frl-grub`, `hdmi-frl-resume`, `hdmi-frl-rebuild`, each with `load`, `enabled`, `active`, `sub`, `result`; the rebuild unit disappears once it has finished |
 | `rebuild` | `state`: `idle`, `running`, `succeeded-needs-reboot` or `failed`, read from this boot's journal; `last_line`, `source_unit`, `log_command` |
-| `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`; `reboot_reason` is the same in words |
+| `reboot_needed`, `reboot_reasons`, `reboot_reason` | Reasons are `module_installed_not_loaded`, `rebuild_succeeded`, `mode_configured_differs`, `allm_configured_differs` (a drop-in value is set and differs from the loaded `driver_default`); `reboot_reason` is the same in words |
 | `tools` | `modetest`, `edid_decode` present; `journal_readable` |
 | `warnings` | Strings; empty when everything could be read |
 
 The rebuild log is `journalctl -b -u hdmi-frl-rebuild -u hdmi-frl-grub`. When the
 transient rebuild unit could not be started, the boot unit rebuilds inline and
 `source_unit` is `hdmi-frl-grub`.
+
+## ALLM
+
+With patch 0003 the HDMI link signals ALLM (Auto Low Latency Mode, the HDMI 2.1
+flag that makes a TV switch to its low-latency game picture mode) by default.
+The module parameter `amdgpu.hdmi_allm_default` sets the initial value of the
+`allm_mode` connector property: `0` disabled, `1` dynamic (ALLM while VRR is
+actively varying or the content type is Game), `2` always on. The default is
+`2`, and the bit is in the HDMI Forum infoframe from the first frame of every
+stream, on both TMDS and FRL links. Software can still change `allm_mode`
+afterwards.
+
+Because it is always on, everything gets ALLM, not just games: Desktop Mode and
+video apps too, so the TV stays in its game picture mode. To keep it for games
+only, or to turn it off:
+
+```
+bash ~/steam-machine-hdmi21/setup.sh allm dynamic      # ALLM while VRR varies or content type is Game
+bash ~/steam-machine-hdmi21/setup.sh allm disabled     # never by default
+bash ~/steam-machine-hdmi21/setup.sh allm always-on    # explicitly the default
+bash ~/steam-machine-hdmi21/setup.sh allm default      # remove the setting, the module default applies
+```
+
+Each writes `/etc/default/grub.d/hdmi21-allm.cfg` (and the marker
+`~/.hdmi21-allm`), runs `update-grub` and offers a reboot; the self-heal puts the
+drop-in back after a SteamOS update, and `setup.sh uninstall` removes it. The
+setting is a kernel parameter of the patched module only: the stock module
+ignores it, so it does nothing before the module is built and loaded. The TV has
+to have ALLM enabled as well (on an LG it is "Instant Game Response"). `setup.sh
+status` shows the configured and the running value, and `status --json` reports
+them as `allm.configured` and `allm.driver_default`, with the live state in
+`allm.active` and `display.content_type_sent`.
 
 ## Uninstall
 
@@ -386,8 +419,8 @@ this setup:
   kept.
 - `/etc/systemd/system/*.service` and `/etc/atomic-update.conf.d/*.conf` are on
   the default keep list, so the self-heal unit survives.
-- `/etc/default/grub.d/hdmi-frl.cfg` is not, which is what
-  `selfheal/atomic-update-keep.conf` is for; `setup-selfheal.sh` installs it as
+- `/etc/default/grub.d/hdmi-frl.cfg` (and `hdmi21-allm.cfg`, if you chose an ALLM
+  setting) is not, which is what `selfheal/atomic-update-keep.conf` is for; `setup-selfheal.sh` installs it as
   `/etc/atomic-update.conf.d/hdmi-frl.conf`.
 - `/lib/modules/.../updates/amdgpu.ko.zst` does not survive, and if the update
   ships a new kernel the old module would not load anyway.
@@ -400,6 +433,8 @@ it:
    grub drop-in. That is the TMDS case.
 2. Recreates the grub drop-in and re-runs `update-grub` if the FRL mask is
    missing.
+   The ALLM drop-in is recreated from its own marker the same way, whether or
+   not the FRL marker exists.
 3. Reinstalls the patched module if `out/` already holds one whose vermagic
    matches the running kernel.
 4. Otherwise starts `build.sh` followed by `install.sh` in a detached transient
@@ -544,7 +579,7 @@ sudo systemctl disable hdmi-frl-resume.service    # turn it back on with enable
 ## Layout
 
 ```
-setup.sh                    one-step installer: install | uninstall | status
+setup.sh                    one-step installer: install | uninstall | status | allm
 get.sh                      bootstrap: downloads a release and runs setup.sh
 hdmi21-install.desktop      Desktop Mode launcher for setup.sh install
 hdmi21-uninstall.desktop    Desktop Mode launcher for setup.sh uninstall
@@ -552,8 +587,9 @@ build.sh                    build a patched amdgpu.ko.zst for the running kernel
 install.sh                  install it into /lib/modules/<kernel>/updates/
 uninstall.sh                remove it again
 hdmi-mode.sh                frl | tmds | status
+hdmi-allm.sh                disabled | dynamic | always-on | default | restore | status
 setup-selfheal.sh           install and enable the boot-time self-heal
-patches/                    the two kernel patches, git format-patch style
+patches/                    the kernel patches, git format-patch style
 selfheal/                   the self-heal scripts, their units, and the atomic keep list
 VERSION                     release version
 CHANGELOG.md                what changed in each release
