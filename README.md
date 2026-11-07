@@ -171,6 +171,7 @@ sudo sh ~/steam-machine-hdmi21/hdmi-mode.sh tmds && sudo reboot
 | Steam Machine "Fremont" | LG C4 83" | 7.2.4-valve1 |
 | Steam Machine "Fremont" | LG C4 83" | 7.2.7-valve1 |
 | Steam Machine "Fremont" | LG C4 83" | 7.2.7-valve2 |
+| Steam Machine "Fremont" | LG C4 83" | 7.2.7-valve2-2 (SteamOS 3.9.5) |
 
 At 3840x2160 144 Hz, 10-bit 4:4:4, HDR, VRR 40-144 Hz. Reports for other TVs and
 monitors are welcome as GitHub issues.
