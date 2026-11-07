@@ -563,6 +563,8 @@ REBUILD_UNIT=${HDMI21_REBUILD_UNIT:-hdmi-frl-rebuild}
 # link probe below inherits them from the environment).
 JSON_SYSFS=${HDMI_FRL_TEST_SYSFS:-/sys/class/drm}
 JSON_DEBUGFS=${HDMI_FRL_TEST_DEBUGFS:-/sys/kernel/debug/dri}
+JSON_MODPARAM=${HDMI_FRL_TEST_MODPARAM:-/sys/module/amdgpu/parameters}
+JSON_GRUBD=${HDMI_FRL_TEST_GRUBD:-/etc/default/grub.d}
 JSON_WARN=""
 UJ=""
 UJ_ACTIVE=""
@@ -589,6 +591,11 @@ json_int_or_null() {
 }
 json_num_or_null() {
 	if [[ $1 =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+# 0, 1, 2 (the amdgpu.hdmi_allm_default values) to the JSON names; empty for
+# anything else.
+allm_name() {
+	case "$1" in 0) printf disabled ;; 1) printf dynamic ;; 2) printf always_on ;; esac
 }
 add_warn() { JSON_WARN="${JSON_WARN:+$JSON_WARN,}$(json_str "$1")"; }
 
@@ -707,7 +714,7 @@ hpo_fields() { # header row
 # Works out the signal fields of the connected display. Called from
 # do_status_json and writes its locals (bash scoping): s_model, s_chroma,
 # s_chroma_src, s_bpc, s_bpc_src, s_colorimetry, hdr_active, hdr_eotf,
-# content_type and the allm_* values.
+# content_type, content_type_sent, a_active and the allm_* values.
 derive_display() {
 	local hf hp_fmt="" hp_depth="" bf cf txt crtc_bpc="" crtc_cs="" byte
 
@@ -739,6 +746,24 @@ derive_display() {
 		fi
 		if [ "$as_root" = 0 ] && [ ! -r "$bf" ] && [ ! -r "$cf" ]; then
 			add_warn "not root: pixel format, bit depth and colorimetry (debugfs) cannot be read"
+		fi
+	fi
+
+	# patched module only: the live stream's ALLM state. content_type is the DC
+	# enum (DISPLAY_CONTENT_TYPE_*), not the DRM property's 0..4. No stream
+	# fails with ENODEV, which reads as nothing.
+	if [ -n "$d_crtc" ] && [ -r "$JSON_DEBUGFS/$d_card/crtc-$d_crtc/amdgpu_current_hdmi" ]; then
+		txt=$(cat "$JSON_DEBUGFS/$d_card/crtc-$d_crtc/amdgpu_current_hdmi" 2>/dev/null || true)
+		if [[ $txt =~ allm_active:[[:space:]]*([01]) ]]; then a_active=${BASH_REMATCH[1]}; fi
+		if [[ $txt =~ content_type:[[:space:]]*([0-9]+) ]]; then
+			case "${BASH_REMATCH[1]}" in
+				0) content_type_sent=no_data ;;
+				1) content_type_sent=graphics ;;
+				2) content_type_sent=photo ;;
+				4) content_type_sent=cinema ;;
+				8) content_type_sent=game ;;
+				*) add_warn "the live stream reports an unknown content type (${BASH_REMATCH[1]})" ;;
+			esac
 		fi
 	fi
 
@@ -866,6 +891,7 @@ do_status_json() {
 	local p_cs="" p_ct="" p_hdr=- p_allm_cap="" p_allm_mode=""
 	local s_model="" s_chroma="" s_chroma_src="" s_bpc="" s_bpc_src="" s_colorimetry=""
 	local hdr_active="" hdr_eotf="" content_type="" allm_mode=""
+	local content_type_sent="" a_active="" a_default="" a_conf="" a_txt
 	local cm cm_name cm_hz d_mode="null" vr vtxt vmin vmax vrr_range="null"
 	local tools_modetest=0 tools_edid=0 jreadable=0
 	local u_grub u_resume u_rebuild a_grub a_rebuild
@@ -1081,6 +1107,15 @@ do_status_json() {
 			fi ;;
 	esac
 
+	# the module parameter as loaded (patched module only) and the grub drop-in
+	if [ -r "$JSON_MODPARAM/hdmi_allm_default" ]; then
+		a_txt=$(cat "$JSON_MODPARAM/hdmi_allm_default" 2>/dev/null || true)
+		[ -z "$(allm_name "$a_txt")" ] || a_default=$a_txt
+	fi
+	if [ -r "$JSON_GRUBD/hdmi21-allm.cfg" ]; then
+		a_txt=$({ sed -n 's/.*amdgpu\.hdmi_allm_default=\([0-9]*\).*/\1/p' "$JSON_GRUBD/hdmi21-allm.cfg" | head -1; } || true)
+		[ -z "$(allm_name "$a_txt")" ] || a_conf=$a_txt
+	fi
 	# reboot reasons
 	sep=""
 	if [ "$m_state" = installed-needs-reboot ]; then
@@ -1094,6 +1129,10 @@ do_status_json() {
 	if [ "$running" != "$configured" ]; then
 		reasons="${reasons}${sep}\"mode_configured_differs\""; sep=","
 		reason_txt="${reason_txt:+$reason_txt; }the next boot is set to $configured but $running is running"
+	fi
+	if [ -n "$a_conf" ] && [ -n "$a_default" ] && [ "$a_conf" != "$a_default" ]; then
+		reasons="${reasons}${sep}\"allm_configured_differs\""; sep=","
+		reason_txt="${reason_txt:+$reason_txt; }the next boot sets the ALLM default to $(allm_name "$a_conf") but $(allm_name "$a_default") is running"
 	fi
 	[ -z "$reasons" ] || reboot_needed=1
 
@@ -1112,9 +1151,9 @@ do_status_json() {
 	J="$J,\"module\":{\"installed\":$(json_bool "$m_inst"),\"installed_vermagic\":$(json_nstr "$m_vm"),\"installed_matches_kernel\":$(json_bool "$m_match"),\"resolves_to_updates\":$(json_bool "$m_res"),\"loaded\":$(json_bool "$m_loaded"),\"taint_o\":$(json_bool "$m_taint"),\"srcversion_match\":$(json_tri "$m_srcmatch"),\"installed_after_boot\":$(json_bool "$m_after"),\"state\":\"$m_state\"}"
 	J="$J,\"display\":{\"connector\":$(json_nstr "$d_conn"),\"connected\":$(json_bool "$d_connected"),\"current_mode\":$d_mode,\"max_pixel_clock_khz\":$(json_int_or_null "$d_clock"),\"frl_modes_present\":$(json_tri "$d_frl"),\"sink_frl\":$(json_tri "$d_sink"),\"link\":{\"state\":$(json_nstr "$l_state"),\"rule\":$(json_nstr "$l_rule"),\"dump\":$(json_nstr "$l_dump"),\"active_pixel_clock_khz\":$(json_int_or_null "$l_active")}"
 	J="$J,\"pixel\":{\"color_model\":$(json_nstr "$s_model"),\"chroma\":$(json_nstr "$s_chroma"),\"chroma_source\":$(json_nstr "$s_chroma_src"),\"bpc\":$(json_int_or_null "$s_bpc"),\"bpc_source\":$(json_nstr "$s_bpc_src"),\"colorimetry\":$(json_nstr "$s_colorimetry")}"
-	J="$J,\"hdr\":{\"active\":$(json_tri "$hdr_active"),\"eotf\":$(json_nstr "$hdr_eotf")},\"content_type\":$(json_nstr "$content_type"),\"content_type_sent\":null}"
+	J="$J,\"hdr\":{\"active\":$(json_tri "$hdr_active"),\"eotf\":$(json_nstr "$hdr_eotf")},\"content_type\":$(json_nstr "$content_type"),\"content_type_sent\":$(json_nstr "$content_type_sent")}"
 	J="$J,\"vrr\":{\"capable\":$(json_tri "$d_vrr"),\"range\":$vrr_range}"
-	J="$J,\"allm\":{\"capable\":$(json_tri "$p_allm_cap"),\"mode\":$(json_nstr "$allm_mode"),\"active\":null,\"driver_default\":null,\"configured\":null}"
+	J="$J,\"allm\":{\"capable\":$(json_tri "$p_allm_cap"),\"mode\":$(json_nstr "$allm_mode"),\"active\":$(json_tri "$a_active"),\"driver_default\":$(json_nstr "$(allm_name "$a_default")"),\"configured\":$(json_nstr "$(allm_name "$a_conf")")}"
 	J="$J,\"units\":{\"hdmi-frl-grub\":$u_grub,\"hdmi-frl-resume\":$u_resume,\"hdmi-frl-rebuild\":$u_rebuild}"
 	J="$J,\"rebuild\":{\"state\":\"$rb_state\",\"last_line\":$(json_nstr "$rb_l"),\"source_unit\":$(json_str "$src"),\"log_command\":$(json_str "journalctl -b -u $REBUILD_UNIT -u hdmi-frl-grub")}"
 	J="$J,\"reboot_needed\":$(json_bool "$reboot_needed"),\"reboot_reasons\":[$reasons],\"reboot_reason\":$(json_nstr "$reason_txt")"
@@ -1125,6 +1164,10 @@ do_status_json() {
 # --- main -----------------------------------------------------------------
 case "$CMD" in
 	status) if [ "$JSON" = 1 ]; then do_status_json; else do_status; fi ;;
+	allm)
+		preflight_basic
+		start_logging
+		do_allm ;;
 	uninstall)
 		preflight_basic
 		start_logging
@@ -1137,7 +1180,3 @@ case "$CMD" in
 		preflight_install
 		do_install ;;
 esac
-	allm)
-		preflight_basic
-		start_logging
-		do_allm ;;
