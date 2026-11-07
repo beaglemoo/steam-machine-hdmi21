@@ -19,3 +19,12 @@ Derived by editing a real capture, not captured:
 
 The older modetest.* and dtn_log.* files (120hz-*, 144hz, frl, tmds, ...) are
 hand-made for tests/frl-detect.sh.
+
+ALLM fixtures, all derived (the patched module that writes them is not in the
+captures):
+  crtc/frl-hdr-allm, -allm-off, -allm-unknown   frl-hdr plus crtc-0/amdgpu_current_hdmi
+                                                as patch 0003 prints it: DC content
+                                                type 8 (game) with ALLM on, 1 (graphics)
+                                                with it off, and 3 (not a DC value)
+  modparam/*/hdmi_allm_default                  /sys/module/amdgpu/parameters
+  grubd/*/hdmi21-allm.cfg                       what hdmi-allm.sh writes

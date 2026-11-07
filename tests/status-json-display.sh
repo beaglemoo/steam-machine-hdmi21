@@ -100,8 +100,12 @@ mk_tree() { # dir crtc-fixture
 	echo enabled > "$1/sys/card0-HDMI-A-1/enabled"
 	if [ "$2" != none ]; then cp -R "$FX/crtc/$2" "$1/dri/0/crtc-0"; fi
 }
+# ALLM inputs: the module parameter and the grub drop-in. Empty directories by
+# default so the machine running the tests never leaks in.
+MODPARAM=none GRUBD=none
+mkdir -p "$T/empty"
 run_status() {
-	local mt=$1 dtn=$2 crtc=$3 setup=${4:-$SETUP} mtpath
+	local mt=$1 dtn=$2 crtc=$3 setup=${4:-$SETUP} mtpath mp gd
 	case "$mt" in none|/*) mtpath=$mt ;; *) mtpath=$FX/$mt ;; esac
 	local d=$T/tree
 	chmod -R u+rwx "$d" 2>/dev/null || true
@@ -112,9 +116,12 @@ run_status() {
 		*) cp "$FX/$dtn" "$d/dri/0/amdgpu_dm_dtn_log" ;;
 	esac
 	: > "$T/count"
+	if [ "$MODPARAM" = none ]; then mp=$T/empty; else mp=$FX/modparam/$MODPARAM; fi
+	if [ "$GRUBD" = none ]; then gd=$T/empty; else gd=$FX/grubd/$GRUBD; fi
 	RC=0
 	STUB_COUNT=$T/count STUB_MODETEST=$mtpath \
 		HDMI_FRL_TEST_SYSFS=$d/sys HDMI_FRL_TEST_DEBUGFS=$d/dri \
+		HDMI_FRL_TEST_MODPARAM=$mp HDMI_FRL_TEST_GRUBD=$gd \
 		PATH="$T/bin:$PATH" bash "$setup" status --json --dir "$T" > "$T/out.json" 2> "$T/err" || RC=$?
 }
 field() { # python expression on the parsed object d -> printed
@@ -132,7 +139,7 @@ expect "frl hdr: link" '["frl", "hpo-row"]' "$(field 'json.dumps([d["display"]["
 expect "frl hdr: hdr, content type, allm" '[true, "pq", "game", true, "disabled"]' "$(hdr)"
 expect "frl hdr: vrr capable from the same run" True "$(field 'd["vrr"]["capable"]')"
 expect "frl hdr: modetest ran once" 1 "$(wc -l < "$T/count" | tr -d ' ')"
-expect "frl hdr: allm and content_type_sent fields not filled yet" '[None, None, None, None]' \
+expect "frl hdr: no patched module readback: allm and content_type_sent null" '[None, None, None, None]' \
 	"$(field '[d["allm"]["active"], d["allm"]["driver_default"], d["allm"]["configured"], d["display"]["content_type_sent"]]')"
 expect "frl hdr: schema still 1" 1 "$(field 'd["schema"]')"
 expect "frl hdr: no pixel warnings" 0 "$(warned 'HPO')"
@@ -234,6 +241,57 @@ if [ "$(id -u)" != 0 ]; then
 else
 	printf 'skipped debugfs-unreadable cases: running as root\n'
 fi
+
+# ALLM readback from the patched module: the live stream, the module parameter
+# and the grub drop-in. content_type there is the DC enum (8 is game).
+allm() { field 'json.dumps([d["allm"][k] for k in ("active","driver_default","configured")] + [d["display"]["content_type_sent"], d["reboot_needed"], d["reboot_reasons"]])'; }
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "live stream: allm active, content type sent game" '[true, null, null, "game", false, []]' "$(allm)"
+MODPARAM=always-on
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "module parameter 2: driver default always_on, no drop-in" '[true, "always_on", null, "game", false, []]' "$(allm)"
+GRUBD=dynamic
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "drop-in dynamic while 2 runs: reboot wanted" \
+	'[true, "always_on", "dynamic", "game", true, ["allm_configured_differs"]]' "$(allm)"
+expect "drop-in differs: the reason in words" \
+	"the next boot sets the ALLM default to dynamic but always_on is running" "$(field 'd["reboot_reason"]')"
+GRUBD=always-on
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "drop-in matches the running value: no reboot" '[true, "always_on", "always_on", "game", false, []]' "$(allm)"
+MODPARAM=dynamic
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "drop-in always_on while 1 runs: reboot wanted" '[true, "dynamic", "always_on", "game", true, ["allm_configured_differs"]]' "$(allm)"
+MODPARAM=none GRUBD=dynamic
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "stock module (no parameter), drop-in set: configured only, no reason" \
+	'[true, null, "dynamic", "game", false, []]' "$(allm)"
+MODPARAM=garbage GRUBD=none
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+expect "parameter value that is not 0, 1 or 2: null" '[true, null, null, "game", false, []]' "$(allm)"
+MODPARAM=none GRUBD=none
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm-off
+expect "ALLM off, DC content type 1: graphics" '[false, null, null, "graphics", false, []]' "$(allm)"
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm-unknown
+expect "DC content type 3 is not a value: null" '[true, null, null, null, false, []]' "$(allm)"
+expect "DC content type 3: warns" 1 "$(warned 'unknown content type')"
+for pair in 0:no_data 1:graphics 2:photo 4:cinema 8:game; do
+	mkdir -p "$T/ct"; rm -rf "$T/ct/c"; cp -R "$FX/crtc/frl-hdr-allm" "$T/ct/c"
+	printf 'allm_active: 1\ncontent_type: %s\n' "${pair%%:*}" > "$T/ct/c/amdgpu_current_hdmi"
+	d=$T/tree; chmod -R u+rwx "$d" 2>/dev/null || true; rm -rf "$d"; mk_tree "$d" none; cp -R "$T/ct/c" "$d/dri/0/crtc-0"
+	cp "$FX/dtn_log.frl-hdr" "$d/dri/0/amdgpu_dm_dtn_log"
+	STUB_COUNT=$T/count STUB_MODETEST=$FX/modetest.frl-hdr HDMI_FRL_TEST_SYSFS=$d/sys HDMI_FRL_TEST_DEBUGFS=$d/dri \
+		HDMI_FRL_TEST_MODPARAM=$T/empty HDMI_FRL_TEST_GRUBD=$T/empty PATH="$T/bin:$PATH" \
+		bash "$SETUP" status --json --dir "$T" > "$T/out.json" 2> "$T/err" || true
+	expect "DC content type ${pair%%:*} is ${pair##*:}" "${pair##*:}" "$(field 'd["display"]["content_type_sent"]')"
+done
+# An empty file (no stream) reads as nothing.
+run_status modetest.frl-hdr dtn_log.frl-hdr frl-hdr-allm
+: > "$T/tree/dri/0/crtc-0/amdgpu_current_hdmi"
+STUB_COUNT=$T/count STUB_MODETEST=$FX/modetest.frl-hdr HDMI_FRL_TEST_SYSFS=$T/tree/sys HDMI_FRL_TEST_DEBUGFS=$T/tree/dri \
+	HDMI_FRL_TEST_MODPARAM=$T/empty HDMI_FRL_TEST_GRUBD=$T/empty PATH="$T/bin:$PATH" \
+	bash "$SETUP" status --json --dir "$T" > "$T/out.json" 2> "$T/err" || true
+expect "empty amdgpu_current_hdmi: nulls" '[null, null, null, null, false, []]' "$(allm)"
 
 # modetest fails: hdr, content type and allm are null.
 run_status none dtn_log.frl-hdr frl-hdr
