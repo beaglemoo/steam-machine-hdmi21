@@ -333,21 +333,28 @@ KREL=7.2.4-valve1-1-neptune-72-g0123456789ab
 
 U=$T/upgrade
 mkdir -p "$U/out" "$U/patches"
-cp "$HERE"/../patches/*.patch "$U/patches/"
+# The patch set 1.0.0 and 1.0.1 shipped; 0003 (ALLM) came with 1.1.0.
+cp "$HERE"/../patches/000[12]-*.patch "$U/patches/"
 printf 'x' > "$U/out/amdgpu-$KREL.ko.zst"
 echo "$KREL SMP preempt mod_unload" > "$U/out/amdgpu-$KREL.ko.zst.vermagic"
 current() { # vermagic kernel -> yes|no
 	if SELF_DIR=$U STUB_VERMAGIC=$1 PATH="$T/bin:$PATH" module_is_current; then echo yes; else echo no; fi
 }
-expect "1.0.0 module (no stamp, shipped patches) is kept" yes "$(current "$KREL")"
+expect "1.0.0 module (no stamp, patches 0001 and 0002) is kept" yes "$(current "$KREL")"
 echo "$LEGACY_PATCHES_SHA" > "$U/out/amdgpu-$KREL.ko.zst.patches"
 expect "stamped module with the same patches is kept" yes "$(current "$KREL")"
+cp "$HERE"/../patches/*.patch "$U/patches/"
+expect "a 1.0.x module is rebuilt once patch 0003 ships" no "$(current "$KREL")"
+cat "$U"/patches/*.patch | sha256sum | cut -d' ' -f1 > "$U/out/amdgpu-$KREL.ko.zst.patches"
+expect "a module stamped with the full patch set is kept" yes "$(current "$KREL")"
+rm "$U/patches/0003-"*.patch
+echo "$LEGACY_PATCHES_SHA" > "$U/out/amdgpu-$KREL.ko.zst.patches"
 echo deadbeef > "$U/out/amdgpu-$KREL.ko.zst.patches"
 expect "stamp from different patches forces a rebuild" no "$(current "$KREL")"
 rm "$U/out/amdgpu-$KREL.ko.zst.patches"
 echo "# changed" >> "$U/patches/0001-amdgpu-dm-frl-vrr-freesync-caps.patch"
 expect "changed patches force a rebuild even with no stamp" no "$(current "$KREL")"
-cp "$HERE"/../patches/*.patch "$U/patches/"
+cp "$HERE"/../patches/000[12]-*.patch "$U/patches/"
 expect "module built for another kernel forces a rebuild" no "$(current 7.2.5-other)"
 expect "HDMI21_REBUILD=1 forces a rebuild" no \
 	"$(HDMI21_REBUILD=1 current "$KREL")"
