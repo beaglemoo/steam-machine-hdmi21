@@ -24,7 +24,7 @@
 > install and uninstall one-liner will keep working.
 
 HDMI 2.1 FRL with working VRR on the Valve Steam Machine, on SteamOS kernel 7.2
-(`linux-neptune-72`) or later.
+(`linux-neptune-72`) up to 7.2.7. Kernel 7.2.10 and later have this natively.
 
 Out of the box the Steam Machine drives an HDMI 2.1 display over TMDS, which
 caps it at 4K120 4:2:0 8-bit. Booting with `amdgpu.dcfeaturemask=0x402` turns on
@@ -82,7 +82,8 @@ other scripts yourself after `setup.sh install`; it has already run them.
 
 ## Requirements
 
-- A Steam Machine on SteamOS 3.9 with kernel `linux-neptune-72` or later. The
+- A Steam Machine on SteamOS 3.9 with kernel `linux-neptune-72`, 7.2.0 to 7.2.7
+  (7.2.10 and later need nothing from this package). The
   installer refuses older kernels, and asks for `HDMI21_ALLOW_UNTESTED_KERNEL=1`
   on a major version above 7.
 - A sudo password for the `deck` user. Set one in Konsole with `passwd` if you
