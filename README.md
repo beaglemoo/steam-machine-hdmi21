@@ -1,5 +1,28 @@
 # steam-machine-hdmi21
 
+> **Notice: native HDMI 2.1 is coming to SteamOS.** Valve's kernel
+> 7.2.10-valve1, currently in the SteamOS Preview Candidate channel (build
+> 20261106.100), has native HDMI 2.1 support. FRL is on by default, VRR works
+> over FRL, FRL survives a TV wake or input switch, and the kernel sends ALLM
+> while VRR is active.
+>
+> This package is not needed on that kernel and cannot build there, because its
+> patches no longer apply. Before switching to Preview Candidate, or before
+> applying that update once it reaches Stable, uninstall and reboot:
+>
+> ```
+> bash <(curl -fsSL https://raw.githubusercontent.com/beaglemoo/steam-machine-hdmi21/main/get.sh) uninstall
+> ```
+>
+> Already updated? Run the same uninstall. Nothing breaks in the meantime: FRL
+> works natively, the self-heal rebuild fails harmlessly at each boot, and the
+> ALLM setting is ignored. On the native kernel ALLM is only sent while VRR is
+> active and is not configurable.
+>
+> Stable and Preview users on SteamOS 3.9.5 (kernel 7.2.7) can keep using this
+> package. The repository will be archived once 7.2.10 reaches Stable; the
+> install and uninstall one-liner will keep working.
+
 HDMI 2.1 FRL with working VRR on the Valve Steam Machine, on SteamOS kernel 7.2
 (`linux-neptune-72`) or later.
 
@@ -140,8 +163,8 @@ HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow 
 bash ~/steam-machine-hdmi21/setup.sh status --json [--dir DIR]
 ```
 
-prints one JSON object (schema 1) on stdout and nothing else, for tools such as
-a Decky plugin. It changes nothing, exits 0 whenever it prints the object, and
+prints one JSON object (schema 1) on stdout and nothing else, for other tools to
+read. It changes nothing, exits 0 whenever it prints the object, and
 puts problems it noticed into `warnings`. It reads the install and state
 directories from `hdmi-frl-grub.service`, so it gives the same answer run as
 root or as `deck`; some fields need root (the VRR range, the link dump, pixel format, bit depth and colorimetry) or the journal. `--json`
