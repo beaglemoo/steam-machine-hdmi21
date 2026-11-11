@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Deprecated
+
+- Valve's kernel 7.2.10-valve1 (SteamOS Preview Candidate build 20261106.100)
+  has native HDMI 2.1 FRL and VRR support. This package is not needed there
+  and cannot build against it.
+- Uninstall before switching to Preview Candidate, or before the update
+  reaches Stable (`setup.sh uninstall`, then reboot). See the notice at the top
+  of the README.
+- Stable and Preview users on SteamOS 3.9.5 (kernel 7.2.7) can keep using this
+  package.
+- The repository will be archived once 7.2.10 reaches Stable. The install and
+  uninstall one-liner will keep working.
+
 ## [1.1.0] - 2026-11-07
 
 ### Added
